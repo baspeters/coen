@@ -2,9 +2,11 @@ package obs
 
 import (
 	"bytes"
+	"encoding/json"
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseLevel(t *testing.T) {
@@ -58,5 +60,45 @@ func TestStateSnapshot(t *testing.T) {
 	}
 	if snap.PeerFingerprint != "SHA256:abc" {
 		t.Fatalf("bad fp: %+v", snap)
+	}
+}
+
+func TestSnapshotConnectedSinceOmitZero(t *testing.T) {
+	// Test disconnected snapshot: connected_since should be absent
+	var s State
+	s.SetDisconnected()
+	snap := s.Snapshot()
+	data, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("marshal disconnected snapshot: %v", err)
+	}
+	jsonStr := string(data)
+	if strings.Contains(jsonStr, "connected_since") {
+		t.Fatalf("disconnected snapshot should not contain connected_since, got: %s", jsonStr)
+	}
+
+	// Test connected snapshot: connected_since should be present
+	var s2 State
+	s2.SetConnected("SHA256:test")
+	snap2 := s2.Snapshot()
+	data2, err := json.Marshal(snap2)
+	if err != nil {
+		t.Fatalf("marshal connected snapshot: %v", err)
+	}
+	jsonStr2 := string(data2)
+	if !strings.Contains(jsonStr2, "connected_since") {
+		t.Fatalf("connected snapshot should contain connected_since, got: %s", jsonStr2)
+	}
+
+	// Verify the zero time is handled correctly
+	var snap3 Snapshot
+	snap3.TunnelConnected = false
+	snap3.ConnectedSince = time.Time{}
+	data3, err := json.Marshal(snap3)
+	if err != nil {
+		t.Fatalf("marshal zero time snapshot: %v", err)
+	}
+	if strings.Contains(string(data3), "connected_since") {
+		t.Fatalf("zero time should be omitted, got: %s", string(data3))
 	}
 }

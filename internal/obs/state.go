@@ -25,17 +25,21 @@ func (s *State) SetConnected(fp string) {
 	s.connectedNano.Store(time.Now().UnixNano())
 	s.peerFP.Store(fp)
 }
-func (s *State) SetDisconnected()          { s.connected.Store(false) }
-func (s *State) StreamOpened()             { s.activeStreams.Add(1); s.totalStreams.Add(1) }
-func (s *State) StreamClosed(in, out int64) { s.activeStreams.Add(-1); s.bytesIn.Add(in); s.bytesOut.Add(out) }
-func (s *State) Reconnect()                { s.reconnects.Add(1) }
-func (s *State) HandshakeOK()              { s.handshakeOK.Add(1) }
-func (s *State) HandshakeFail()            { s.handshakeFail.Add(1) }
-func (s *State) SetError(e string)         { s.lastError.Store(e) }
+func (s *State) SetDisconnected() { s.connected.Store(false) }
+func (s *State) StreamOpened()    { s.activeStreams.Add(1); s.totalStreams.Add(1) }
+func (s *State) StreamClosed(in, out int64) {
+	s.activeStreams.Add(-1)
+	s.bytesIn.Add(in)
+	s.bytesOut.Add(out)
+}
+func (s *State) Reconnect()        { s.reconnects.Add(1) }
+func (s *State) HandshakeOK()      { s.handshakeOK.Add(1) }
+func (s *State) HandshakeFail()    { s.handshakeFail.Add(1) }
+func (s *State) SetError(e string) { s.lastError.Store(e) }
 
 type Snapshot struct {
 	TunnelConnected bool      `json:"tunnel_connected"`
-	ConnectedSince  time.Time `json:"connected_since,omitempty"`
+	ConnectedSince  time.Time `json:"connected_since,omitzero"`
 	ActiveStreams   int64     `json:"active_streams"`
 	TotalStreams    int64     `json:"total_streams"`
 	BytesIn         int64     `json:"bytes_in"`
