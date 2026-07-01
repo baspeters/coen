@@ -10,6 +10,9 @@ import (
 // then closes both to unblock the other. Returns bytes copied a→b and b→a.
 func Pipe(a, b io.ReadWriteCloser) (aToB, bToA int64, err error) {
 	errc := make(chan error, 2)
+	// aToB/bToA are written by the goroutines below and read only after both
+	// have sent to errc (drained via e1,e2), so the channel receives establish
+	// happens-before — no data race on the named returns.
 	go func() {
 		n, e := io.Copy(b, a)
 		aToB = n
@@ -25,7 +28,7 @@ func Pipe(a, b io.ReadWriteCloser) (aToB, bToA int64, err error) {
 	_ = b.Close()
 	e2 := <-errc
 	for _, e := range []error{e1, e2} {
-		if e != nil && !errors.Is(e, io.EOF) && !errors.Is(e, net.ErrClosed) {
+		if e != nil && !errors.Is(e, io.EOF) && !errors.Is(e, net.ErrClosed) && !errors.Is(e, io.ErrClosedPipe) {
 			err = e
 			break
 		}
