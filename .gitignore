@@ -1,0 +1,6 @@
+/bin/
+*.out
+coverage.txt
+
+# Personal working docs (spec/plan) — not part of the project
+docs/superpowers/
