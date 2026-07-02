@@ -33,6 +33,62 @@ archives:
       - LICENSE
       - packaging/**/*
 
+nfpms:
+  - id: coen
+    package_name: coen
+    ids:
+      - coen
+    vendor: Bas Peters
+    homepage: https://github.com/baspeters/coen
+    maintainer: Bas Peters <bas@baspeters.com>
+    description: |-
+      Lightweight, secure, self-hosted tunnel.
+
+      A public edge and a private agent form one always-on, mutually
+      authenticated (mTLS) connection that routes HTTPS and WebSocket traffic
+      to a service that is not reachable from the internet.
+    license: MIT
+    formats:
+      - deb
+      - rpm
+      - apk
+    bindir: /usr/bin
+    contents:
+      - src: packaging/systemd/coen-edge.service
+        dst: /usr/lib/systemd/system/coen-edge.service
+      - src: packaging/systemd/coen-agent.service
+        dst: /usr/lib/systemd/system/coen-agent.service
+      - src: internal/cli/assets/edge.yaml
+        dst: /etc/coen/edge.yaml
+        type: config|noreplace
+        file_info:
+          mode: 0640
+      - src: internal/cli/assets/agent.yaml
+        dst: /etc/coen/agent.yaml
+        type: config|noreplace
+        file_info:
+          mode: 0640
+      - dst: /etc/coen/pki
+        type: dir
+        file_info:
+          mode: 0750
+      - dst: /etc/coen/certs
+        type: dir
+        file_info:
+          mode: 0750
+      # Shipped as plain files under /usr/share/doc: goreleaser's bundled nfpm
+      # silently drops entries typed "doc", so install these directly.
+      - src: packaging/nginx/coen.conf
+        dst: /usr/share/doc/coen/examples/nginx-coen.conf
+      - src: README.md
+        dst: /usr/share/doc/coen/README.md
+      - src: LICENSE
+        dst: /usr/share/doc/coen/LICENSE
+    scripts:
+      postinstall: packaging/scripts/postinstall.sh
+      preremove: packaging/scripts/preremove.sh
+      postremove: packaging/scripts/postremove.sh
+
 checksum:
   name_template: checksums.txt
 

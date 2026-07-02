@@ -184,6 +184,34 @@ sudo install coen /usr/local/bin/coen
 coen version
 ```
 
+### Linux packages (.deb, .rpm, .apk)
+
+Every release also ships native packages for amd64 and arm64. They install the
+binary to `/usr/bin/coen`, add systemd units for both roles under
+`/usr/lib/systemd/system`, create a dedicated `coen` service user, and lay down
+example configs in `/etc/coen` (preserved across upgrades). Download the file
+for your distribution from the
+[latest release](https://github.com/baspeters/coen/releases/latest):
+
+```bash
+# Debian, Ubuntu
+sudo dpkg -i coen_*_linux_amd64.deb
+
+# Fedora, RHEL, openSUSE
+sudo rpm -i coen_*_linux_amd64.rpm
+
+# Alpine
+sudo apk add --allow-untrusted coen_*_linux_amd64.apk
+```
+
+The services are installed but not started. Edit the config for your role, put
+the certificates under `/etc/coen` (see [Quick start](#quick-start)), then
+enable the unit:
+
+```bash
+sudo systemctl enable --now coen-edge     # or coen-agent
+```
+
 ### With `go install`
 
 Requires Go 1.25 or newer:
