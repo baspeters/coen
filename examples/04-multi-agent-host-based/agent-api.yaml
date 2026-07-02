@@ -1,4 +1,4 @@
-# Agent B — owns api.example.com, running on a different private host. Its client
+# Agent B owns api.example.com, running on a different private host. Its client
 # cert's fingerprint must match edge.d/team-b.yaml's agent_fingerprint.
 edge:
   address: edge.example.com:2636

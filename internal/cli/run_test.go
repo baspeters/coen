@@ -104,7 +104,7 @@ func TestAgentLevelMissingConfig(t *testing.T) {
 // and stop left nil, Run returns err immediately. When set, Run closes ready
 // right after being invoked (so a test knows runDaemon has reached the point
 // of launching its admin-server goroutine) and then blocks until stop is
-// closed before returning err — this lets a test give the admin goroutine as
+// closed before returning err; this lets a test give the admin goroutine as
 // much time as it needs without racing runDaemon's shutdown (which happens
 // as soon as Run returns).
 type fakeRunner struct {
@@ -180,8 +180,8 @@ func TestRunDaemonWithSocket(t *testing.T) {
 	}
 }
 
-// TestEdgeCmdBindFailure drives newEdgeCmd's full body — config load, logger
-// setup, edge.New, then runDaemon calling into edge.Run — by pointing
+// TestEdgeCmdBindFailure drives newEdgeCmd's full body: config load, logger
+// setup, edge.New, then runDaemon calling into edge.Run, by pointing
 // tunnel.listen at a port that's already bound, so edge.Run's listener setup
 // fails fast and the command surfaces that error.
 func TestEdgeCmdBindFailure(t *testing.T) {

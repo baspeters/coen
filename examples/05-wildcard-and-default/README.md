@@ -1,7 +1,7 @@
-# 05 — Wildcard and default routes
+# 05. Wildcard and default routes
 
-Demonstrates the matching precedence: **exact > wildcard (`*.suffix`) > default
-(`*`)**.
+Shows the matching precedence: exact, then wildcard (`*.suffix`), then default
+(`*`).
 
 | Request host | Matches | Backend |
 |--------------|---------|---------|
@@ -11,11 +11,9 @@ Demonstrates the matching precedence: **exact > wildcard (`*.suffix`) > default
 | `other.org` | default `*` | `127.0.0.1:8099` |
 
 - A `*.example.com` wildcard matches any host ending in `.example.com` with at
-  least one leading label. When several wildcards match, the **longest** suffix
-  wins.
-- The default `*` route is optional; without it, an unmatched host gets a `404`.
-- Both the edge (ownership) and the agent (backend mapping) use the same
-  patterns.
+  least one leading label. When several wildcards match, the longest suffix wins.
+- The default `*` route is optional. Without it, an unmatched host gets a `404`.
+- The edge (ownership) and the agent (backend mapping) use the same patterns.
 
 ## Notes
 

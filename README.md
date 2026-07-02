@@ -431,10 +431,10 @@ admin:
 ```
 
 Routes may also be split into drop-in files under a `<name>.d/` directory next to
-the config (`edge.yaml` → `edge.d/`). Each drop-in is a routes-only fragment
-(`routes: [ ... ]`), merged in sorted filename order; a duplicate host across
-files is a load error. The fingerprint allowlist is derived from the routes — an
-agent whose fingerprint owns no route is refused.
+the config file (`edge.yaml` uses `edge.d/`). Each drop-in is a routes-only
+fragment (`routes: [ ... ]`), merged in sorted filename order; a duplicate host
+across files is a load error. The fingerprint allowlist is derived from the
+routes, so an agent whose fingerprint owns no route is refused.
 
 `agent.yaml`:
 

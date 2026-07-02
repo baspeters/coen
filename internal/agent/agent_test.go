@@ -268,7 +268,7 @@ func writeCAFile(t *testing.T) (*pki.CA, string) {
 }
 
 // writeAgentPKI creates a fresh CA plus an agent client cert/key issued by it and writes all
-// three to temp files — the trust material New() needs in order to succeed.
+// three to temp files, the trust material New() needs in order to succeed.
 func writeAgentPKI(t *testing.T) (ca *pki.CA, caPath, certPath, keyPath string) {
 	t.Helper()
 	ca, caPath = writeCAFile(t)
@@ -296,7 +296,7 @@ func newEdgeListener(t *testing.T, clientCAPool *x509.CertPool, edgeCert tls.Cer
 
 // openStreamAndWrite accepts a single connection on ln, establishes the yamux server
 // session, opens one stream, invokes write on it, then blocks reading from it. The returned
-// channel closes once that read unblocks — i.e. once the agent has closed its end of the
+// channel closes once that read unblocks, i.e. once the agent has closed its end of the
 // stream, which happens as soon as handleStream returns (on a failed preamble read or a
 // failed service dial).
 func openStreamAndWrite(t *testing.T, ln net.Listener, write func(net.Conn) error) <-chan struct{} {
@@ -435,7 +435,7 @@ func TestConnectOnceTLSHandshakeFailureWrongCA(t *testing.T) {
 	edgeCertPEM, edgeKeyPEM, _ := otherCA.IssueServer("127.0.0.1")
 	edgeCert, _ := tls.X509KeyPair(edgeCertPEM, edgeKeyPEM)
 	// The edge trusts the agent's real client cert, so the client-cert side of the mutual
-	// handshake is not what fails here — only server-cert verification is.
+	// handshake is not what fails here; only server-cert verification is.
 	edgeClientPool, _ := pki.CertPoolFromPEM(trustedCA.CertPEM())
 	edgeLn := newEdgeListener(t, edgeClientPool, edgeCert)
 

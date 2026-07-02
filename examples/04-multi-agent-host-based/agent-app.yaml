@@ -1,4 +1,4 @@
-# Agent A — owns app.example.com. Its client cert's fingerprint must match
+# Agent A owns app.example.com. Its client cert's fingerprint must match
 # edge.d/team-a.yaml's agent_fingerprint.
 edge:
   address: edge.example.com:2636
