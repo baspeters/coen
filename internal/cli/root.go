@@ -9,19 +9,24 @@ import (
 // Version is set at build time via -ldflags.
 var Version = "dev"
 
-var subcommands []*cobra.Command
+// builders holds subcommand constructors; each command file registers one from
+// its init(). newRootCmd invokes them to build FRESH command instances on every
+// call, so cobra flag state never leaks between Execute (or test) invocations.
+var builders []func() *cobra.Command
 
-// register adds a subcommand; each command file calls this from its init().
-func register(c *cobra.Command) { subcommands = append(subcommands, c) }
+// register adds a subcommand constructor; each command file calls this from its init().
+func register(build func() *cobra.Command) { builders = append(builders, build) }
 
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "coen",
-		Short:         "Coen — a lightweight, secure self-hosted tunnel",
+		Short:         "A lightweight, secure, self-hosted tunnel",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(subcommands...)
+	for _, build := range builders {
+		root.AddCommand(build())
+	}
 	return root
 }
 

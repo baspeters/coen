@@ -13,7 +13,7 @@ import (
 //go:embed assets/*.service assets/*.yaml
 var assets embed.FS
 
-func init() { register(newInstallCmd()) }
+func init() { register(newInstallCmd) }
 
 func newInstallCmd() *cobra.Command {
 	var unitDir, configDir, bin string

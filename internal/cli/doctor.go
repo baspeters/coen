@@ -9,7 +9,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func init() { register(newDoctorCmd()) }
+func init() { register(newDoctorCmd) }
 
 func newDoctorCmd() *cobra.Command {
 	var cfgPath, role string

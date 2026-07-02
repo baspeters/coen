@@ -9,7 +9,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func init() { register(newCertCmd()) }
+func init() { register(newCertCmd) }
 
 func newCertCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "cert", Short: "Manage the Coen tunnel PKI"}

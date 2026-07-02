@@ -6,7 +6,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func init() { register(newVersionCmd()) }
+func init() { register(newVersionCmd) }
 
 func newVersionCmd() *cobra.Command {
 	return &cobra.Command{

@@ -16,8 +16,8 @@ import (
 )
 
 func init() {
-	register(newEdgeCmd())
-	register(newAgentCmd())
+	register(newEdgeCmd)
+	register(newAgentCmd)
 }
 
 type runner interface {

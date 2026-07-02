@@ -8,7 +8,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func init() { register(newStatusCmd()) }
+func init() { register(newStatusCmd) }
 
 func newStatusCmd() *cobra.Command {
 	var socket string

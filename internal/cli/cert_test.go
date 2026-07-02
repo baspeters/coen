@@ -145,6 +145,25 @@ func TestCertInitForceOverwritesCA(t *testing.T) {
 	}
 }
 
+// TestCertInitFlagStateDoesNotLeakAcrossRuns guards against cobra flag state
+// leaking between runCLI invocations: newRootCmd must build fresh commands so a
+// prior "--force" run does not silently carry into a later run without it.
+func TestCertInitFlagStateDoesNotLeakAcrossRuns(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := runCLI(t, "cert", "init", "--dir", dir); err != nil {
+		t.Fatalf("first init: %v", err)
+	}
+	// A run WITH --force flips the flag on this invocation.
+	if _, err := runCLI(t, "cert", "init", "--dir", dir, "--force"); err != nil {
+		t.Fatalf("init --force: %v", err)
+	}
+	// A later run WITHOUT --force must still refuse to overwrite; if --force
+	// leaked from the previous run, this would wrongly succeed.
+	if _, err := runCLI(t, "cert", "init", "--dir", dir); err == nil {
+		t.Fatal("cert init without --force should refuse to overwrite an existing CA (flag leaked across runs)")
+	}
+}
+
 // TestCertInitFailsWhenDirParentIsFile covers newCertInitCmd's
 // os.MkdirAll(dir, ...) error branch: a path component of --dir is a
 // regular file, so it can never be created as a directory.
