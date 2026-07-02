@@ -12,6 +12,7 @@ import (
 type Preamble struct {
 	ConnID     string `json:"conn_id"`
 	ClientAddr string `json:"client_addr"`
+	Host       string `json:"host"`
 }
 
 const maxPreamble = 4096

@@ -183,3 +183,18 @@ func TestClientTLSConfigSetsServerName(t *testing.T) {
 		t.Fatalf("bad client config: %+v", cfg)
 	}
 }
+
+func TestPreambleRoundTripHost(t *testing.T) {
+	var buf bytes.Buffer
+	in := Preamble{ConnID: "abc", ClientAddr: "1.2.3.4:5", Host: "app.example.com"}
+	if err := WritePreamble(&buf, in); err != nil {
+		t.Fatal(err)
+	}
+	out, err := ReadPreamble(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Host != in.Host {
+		t.Errorf("Host = %q, want %q", out.Host, in.Host)
+	}
+}
