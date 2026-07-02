@@ -100,12 +100,14 @@ func CheckAgent(cfg *config.AgentConfig) []Result {
 		_ = tconn.Close()
 	}
 
-	sc, err := net.DialTimeout("tcp", cfg.Service.Address, 3*time.Second)
-	if err != nil {
-		out = append(out, fail("service: reach", err.Error(), "start the local service or fix service.address"))
-	} else {
+	for _, r := range cfg.Routes {
+		sc, err := net.DialTimeout("tcp", r.Service, 3*time.Second)
+		if err != nil {
+			out = append(out, fail("service: reach "+r.Host, err.Error(), "start the local service or fix the route's service address"))
+			continue
+		}
 		_ = sc.Close()
-		out = append(out, ok("service: reach", cfg.Service.Address))
+		out = append(out, ok("service: reach "+r.Host, r.Service))
 	}
 	return out
 }

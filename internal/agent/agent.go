@@ -14,6 +14,7 @@ import (
 	"github.com/baspeters/coen/internal/obs"
 	"github.com/baspeters/coen/internal/pki"
 	"github.com/baspeters/coen/internal/proxy"
+	"github.com/baspeters/coen/internal/route"
 	"github.com/baspeters/coen/internal/tunnel"
 )
 
@@ -22,6 +23,7 @@ type Agent struct {
 	log    *slog.Logger
 	state  *obs.State
 	tlsCfg *tls.Config
+	routes *route.Matcher[string] // host -> local backend service address
 }
 
 func New(cfg *config.AgentConfig, log *slog.Logger, state *obs.State) (*Agent, error) {
@@ -41,7 +43,11 @@ func New(cfg *config.AgentConfig, log *slog.Logger, state *obs.State) (*Agent, e
 	if err != nil {
 		return nil, fmt.Errorf("edge.address %q: %w", cfg.Edge.Address, err)
 	}
-	return &Agent{cfg: cfg, log: log, state: state, tlsCfg: tunnel.ClientTLSConfig(pool, cert, host)}, nil
+	entries := make([]route.Entry[string], 0, len(cfg.Routes))
+	for _, r := range cfg.Routes {
+		entries = append(entries, route.Entry[string]{Pattern: r.Host, Value: r.Service})
+	}
+	return &Agent{cfg: cfg, log: log, state: state, tlsCfg: tunnel.ClientTLSConfig(pool, cert, host), routes: route.Build(entries)}, nil
 }
 
 func (a *Agent) Run(ctx context.Context) error {
@@ -133,15 +139,20 @@ func (a *Agent) handleStream(stream net.Conn) {
 		a.log.Warn("stream.preamble_error", "error", err.Error())
 		return
 	}
-	log := a.log.With("conn_id", p.ConnID, "client_addr", p.ClientAddr)
+	log := a.log.With("conn_id", p.ConnID, "client_addr", p.ClientAddr, "host", p.Host)
+	svcAddr, ok := a.routes.Match(p.Host)
+	if !ok {
+		log.Warn("stream.no_route", "host", p.Host)
+		return
+	}
 	log.Info("stream.accept")
-	svc, err := (&net.Dialer{Timeout: 10 * time.Second}).Dial("tcp", a.cfg.Service.Address)
+	svc, err := (&net.Dialer{Timeout: 10 * time.Second}).Dial("tcp", svcAddr)
 	if err != nil {
-		log.Error("service.dial_error", "address", a.cfg.Service.Address, "error", err.Error())
+		log.Error("service.dial_error", "address", svcAddr, "error", err.Error())
 		return
 	}
 	a.state.StreamOpened()
-	log.Debug("service.dial", "address", a.cfg.Service.Address)
+	log.Debug("service.dial", "address", svcAddr)
 	in, out, _ := proxy.Pipe(stream, svc)
 	a.state.StreamClosed(in, out)
 	log.Info("stream.closed", "bytes_in", in, "bytes_out", out)

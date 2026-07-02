@@ -17,6 +17,7 @@ import (
 	"github.com/baspeters/coen/internal/config"
 	"github.com/baspeters/coen/internal/obs"
 	"github.com/baspeters/coen/internal/pki"
+	"github.com/baspeters/coen/internal/route"
 	"github.com/baspeters/coen/internal/tunnel"
 )
 
@@ -76,7 +77,7 @@ func TestAgentBridgesStreamToService(t *testing.T) {
 
 	cfg := &config.AgentConfig{
 		Edge:      config.EdgeRef{Address: edgeLn.Addr().String(), CA: caPath, Cert: certPath, Key: keyPath},
-		Service:   config.ServiceConfig{Address: svcLn.Addr().String()},
+		Routes:    []config.AgentRoute{{Host: "*", Service: svcLn.Addr().String()}},
 		Reconnect: config.ReconnectConfig{MinBackoff: config.Duration(10 * time.Millisecond), MaxBackoff: config.Duration(50 * time.Millisecond)},
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -147,7 +148,7 @@ func TestAgentRefusesMismatchedEdgeFingerprint(t *testing.T) {
 			Key:             keyPath,
 			EdgeFingerprint: "SHA256:nope",
 		},
-		Service:   config.ServiceConfig{Address: "127.0.0.1:1"},
+		Routes:    []config.AgentRoute{{Host: "*", Service: "127.0.0.1:1"}},
 		Reconnect: config.ReconnectConfig{MinBackoff: config.Duration(5 * time.Millisecond), MaxBackoff: config.Duration(20 * time.Millisecond)},
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -222,7 +223,7 @@ func TestAgentRunReturnsOnCtxCancelWhileConnected(t *testing.T) {
 
 	cfg := &config.AgentConfig{
 		Edge:      config.EdgeRef{Address: edgeLn.Addr().String(), CA: caPath, Cert: certPath, Key: keyPath},
-		Service:   config.ServiceConfig{Address: "127.0.0.1:1"}, // never dialed (no streams)
+		Routes:    []config.AgentRoute{{Host: "*", Service: "127.0.0.1:1"}}, // never dialed (no streams)
 		Reconnect: config.ReconnectConfig{MinBackoff: config.Duration(10 * time.Millisecond), MaxBackoff: config.Duration(50 * time.Millisecond)},
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -327,7 +328,7 @@ func openStreamAndWrite(t *testing.T, ln net.Listener, write func(net.Conn) erro
 func TestNewMissingCAFile(t *testing.T) {
 	cfg := &config.AgentConfig{
 		Edge:      config.EdgeRef{Address: "127.0.0.1:9999", CA: filepath.Join(t.TempDir(), "missing-ca.crt"), Cert: "unused-cert", Key: "unused-key"},
-		Service:   config.ServiceConfig{Address: "127.0.0.1:1"},
+		Routes:    []config.AgentRoute{{Host: "*", Service: "127.0.0.1:1"}},
 		Reconnect: config.ReconnectConfig{MinBackoff: config.Duration(time.Millisecond), MaxBackoff: config.Duration(time.Millisecond)},
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -343,7 +344,7 @@ func TestNewInvalidCAPEM(t *testing.T) {
 
 	cfg := &config.AgentConfig{
 		Edge:      config.EdgeRef{Address: "127.0.0.1:9999", CA: caPath, Cert: "unused-cert", Key: "unused-key"},
-		Service:   config.ServiceConfig{Address: "127.0.0.1:1"},
+		Routes:    []config.AgentRoute{{Host: "*", Service: "127.0.0.1:1"}},
 		Reconnect: config.ReconnectConfig{MinBackoff: config.Duration(time.Millisecond), MaxBackoff: config.Duration(time.Millisecond)},
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -362,7 +363,7 @@ func TestNewBadCertKeyPair(t *testing.T) {
 
 	cfg := &config.AgentConfig{
 		Edge:      config.EdgeRef{Address: "127.0.0.1:9999", CA: caPath, Cert: certPath, Key: keyPath},
-		Service:   config.ServiceConfig{Address: "127.0.0.1:1"},
+		Routes:    []config.AgentRoute{{Host: "*", Service: "127.0.0.1:1"}},
 		Reconnect: config.ReconnectConfig{MinBackoff: config.Duration(time.Millisecond), MaxBackoff: config.Duration(time.Millisecond)},
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -377,7 +378,7 @@ func TestNewEdgeAddressMissingPort(t *testing.T) {
 
 	cfg := &config.AgentConfig{
 		Edge:      config.EdgeRef{Address: "no-port-host", CA: caPath, Cert: certPath, Key: keyPath},
-		Service:   config.ServiceConfig{Address: "127.0.0.1:1"},
+		Routes:    []config.AgentRoute{{Host: "*", Service: "127.0.0.1:1"}},
 		Reconnect: config.ReconnectConfig{MinBackoff: config.Duration(time.Millisecond), MaxBackoff: config.Duration(time.Millisecond)},
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -400,7 +401,7 @@ func TestConnectOnceDialFailure(t *testing.T) {
 
 	cfg := &config.AgentConfig{
 		Edge:      config.EdgeRef{Address: unreachable, CA: caPath, Cert: certPath, Key: keyPath},
-		Service:   config.ServiceConfig{Address: "127.0.0.1:1"},
+		Routes:    []config.AgentRoute{{Host: "*", Service: "127.0.0.1:1"}},
 		Reconnect: config.ReconnectConfig{MinBackoff: config.Duration(time.Millisecond), MaxBackoff: config.Duration(time.Millisecond)},
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -451,7 +452,7 @@ func TestConnectOnceTLSHandshakeFailureWrongCA(t *testing.T) {
 
 	cfg := &config.AgentConfig{
 		Edge:      config.EdgeRef{Address: edgeLn.Addr().String(), CA: caPath, Cert: certPath, Key: keyPath},
-		Service:   config.ServiceConfig{Address: "127.0.0.1:1"},
+		Routes:    []config.AgentRoute{{Host: "*", Service: "127.0.0.1:1"}},
 		Reconnect: config.ReconnectConfig{MinBackoff: config.Duration(time.Millisecond), MaxBackoff: config.Duration(time.Millisecond)},
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -496,7 +497,7 @@ func TestHandleStreamServiceDialFailure(t *testing.T) {
 
 	cfg := &config.AgentConfig{
 		Edge:      config.EdgeRef{Address: edgeLn.Addr().String(), CA: caPath, Cert: certPath, Key: keyPath},
-		Service:   config.ServiceConfig{Address: closedAddr},
+		Routes:    []config.AgentRoute{{Host: "*", Service: closedAddr}},
 		Reconnect: config.ReconnectConfig{MinBackoff: config.Duration(10 * time.Millisecond), MaxBackoff: config.Duration(50 * time.Millisecond)},
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -556,7 +557,7 @@ func TestHandleStreamMalformedPreamble(t *testing.T) {
 
 	cfg := &config.AgentConfig{
 		Edge:      config.EdgeRef{Address: edgeLn.Addr().String(), CA: caPath, Cert: certPath, Key: keyPath},
-		Service:   config.ServiceConfig{Address: svcLn.Addr().String()},
+		Routes:    []config.AgentRoute{{Host: "*", Service: svcLn.Addr().String()}},
 		Reconnect: config.ReconnectConfig{MinBackoff: config.Duration(10 * time.Millisecond), MaxBackoff: config.Duration(50 * time.Millisecond)},
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -620,4 +621,65 @@ func TestWithJitterRange(t *testing.T) {
 			t.Fatalf("withJitter(%v) = %v, want in [%v, %v)", d, got, lower, upper)
 		}
 	}
+}
+
+func TestHandleStreamRoutesToBackendByHost(t *testing.T) {
+	// Backend that announces itself.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		_, _ = c.Write([]byte("BACKEND-OK"))
+		_ = c.Close()
+	}()
+
+	a := &Agent{
+		log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		state: &obs.State{},
+		routes: route.Build([]route.Entry[string]{
+			{Pattern: "app.example.com", Value: ln.Addr().String()},
+		}),
+	}
+
+	client, streamSide := net.Pipe()
+	go a.handleStream(streamSide)
+	if err := tunnel.WritePreamble(client, tunnel.Preamble{ConnID: "x", Host: "app.example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 32)
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, err := client.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(buf[:n]) != "BACKEND-OK" {
+		t.Fatalf("got %q, want BACKEND-OK", buf[:n])
+	}
+	_ = client.Close()
+}
+
+func TestHandleStreamNoRouteClosesStream(t *testing.T) {
+	a := &Agent{
+		log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		state:  &obs.State{},
+		routes: route.Build([]route.Entry[string]{{Pattern: "app.example.com", Value: "127.0.0.1:1"}}),
+	}
+	client, streamSide := net.Pipe()
+	go a.handleStream(streamSide)
+	if err := tunnel.WritePreamble(client, tunnel.Preamble{ConnID: "x", Host: "unknown.example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	// With no matching route the agent closes the stream without dialing.
+	buf := make([]byte, 4)
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := client.Read(buf); err == nil {
+		t.Fatal("expected stream to be closed for an unrouted host")
+	}
+	_ = client.Close()
 }

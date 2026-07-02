@@ -69,14 +69,14 @@ func TestCheckAgentPassesMTLSButDetectsDeadService(t *testing.T) {
 	_ = dead.Close()
 
 	cfg := &config.AgentConfig{
-		Edge:    config.EdgeRef{Address: edgeLn.Addr().String(), CA: caPath, Cert: certPath, Key: keyPath},
-		Service: config.ServiceConfig{Address: deadAddr},
+		Edge:   config.EdgeRef{Address: edgeLn.Addr().String(), CA: caPath, Cert: certPath, Key: keyPath},
+		Routes: []config.AgentRoute{{Host: "*", Service: deadAddr}},
 	}
 	results := CheckAgent(cfg)
 	if mtls, _ := findResult(results, "mtls: handshake"); !mtls.OK {
 		t.Fatalf("mtls should pass: %+v", mtls)
 	}
-	svc, found := findResult(results, "service: reach")
+	svc, found := findResult(results, "service: reach *")
 	if !found || svc.OK {
 		t.Fatalf("service check should fail (found=%v): %+v", found, svc)
 	}
@@ -487,8 +487,8 @@ func TestCheckAgentMatchingFingerprintPin(t *testing.T) {
 	_ = dead.Close()
 
 	cfg := &config.AgentConfig{
-		Edge:    config.EdgeRef{Address: edgeLn.Addr().String(), CA: caPath, Cert: certPath, Key: keyPath, EdgeFingerprint: fp},
-		Service: config.ServiceConfig{Address: deadAddr},
+		Edge:   config.EdgeRef{Address: edgeLn.Addr().String(), CA: caPath, Cert: certPath, Key: keyPath, EdgeFingerprint: fp},
+		Routes: []config.AgentRoute{{Host: "*", Service: deadAddr}},
 	}
 	results := CheckAgent(cfg)
 	if mtls, _ := findResult(results, "mtls: handshake"); !mtls.OK {
