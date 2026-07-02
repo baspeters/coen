@@ -15,10 +15,11 @@ a single, always-on, mutually authenticated connection. It covers the same groun
 Cloudflare Tunnel or ngrok, except you run both ends and nothing sits between your traffic
 and your two machines.
 
-> Status: this is an MVP. The tunnel core (mTLS transport, HTTP and WebSocket forwarding,
-> reconnect, diagnostics) is implemented and covered by unit and end-to-end tests. Some
-> production hardening (public-listener limits, graceful in-flight draining, metrics,
-> multi-route) is still on the [roadmap](#roadmap). Read the [security model](#security-model)
+> Status: the tunnel core (mTLS transport, HTTP and WebSocket forwarding, reconnect,
+> diagnostics) plus multi-agent host-based routing, public-listener limits (connection
+> caps, idle deadlines, lazy backend dial), and bounded graceful draining are implemented
+> and covered by unit and end-to-end tests. A Prometheus `/metrics` endpoint and ACME
+> certificates are still on the [roadmap](#roadmap). Read the [security model](#security-model)
 > before you expose an edge to the public internet.
 
 ## Table of contents
@@ -30,6 +31,7 @@ and your two machines.
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [Deployment modes](#deployment-modes)
+- [Examples](#examples)
 - [Command overview](#command-overview)
 - [Configuration reference](#configuration-reference)
 - [Security model](#security-model)
@@ -257,6 +259,9 @@ tunnel:
   ca:   ./pki/ca.crt
   cert: ./pki/edge.crt
   key:  ./pki/edge.key
+routes:
+  - host: "*"                   # catch-all for the trial (see Configuration reference)
+    agent_fingerprint: "<my-agent's fingerprint>"   # printed by `coen cert agent`
 admin:
   socket: /tmp/coen-edge.sock
 ```
@@ -268,8 +273,9 @@ edge:
   ca:   ./pki/ca.crt
   cert: ./pki/agent.crt
   key:  ./pki/agent.key
-service:
-  address: 127.0.0.1:9000     # your local app
+routes:
+  - host: "*"
+    service: 127.0.0.1:9000     # your local app
 admin:
   socket: /tmp/coen-agent.sock
 ```
@@ -335,6 +341,21 @@ location / {
 Only the tunnel port (`2636`) needs to be reachable by the agent. nginx keeps `:443`, and the
 mTLS tunnel stays end to end, since nginx never sees the tunnel's certificates.
 
+## Examples
+
+The [`examples/`](examples/) directory has worked configurations for every setup variant and
+config option, each with its own README:
+
+| Example | Shows |
+| --- | --- |
+| [standalone, single host](examples/01-standalone-single-host/) | the smallest one-host tunnel |
+| [proxied behind nginx](examples/02-proxied-nginx/) | coen behind an existing nginx vhost |
+| [multiple routes, one agent](examples/03-multi-route-one-agent/) | one agent fronting several hosts/backends |
+| [multiple agents, host-based](examples/04-multi-agent-host-based/) | two agents owning distinct hosts, via `edge.d/` drop-ins |
+| [wildcard and default](examples/05-wildcard-and-default/) | `*.example.com` + `*` catch-all matching |
+| [hardening and limits](examples/06-hardening-and-limits/) | connection caps, idle deadline, per-route caps, draining |
+| [proxied multi-host TLS](examples/07-proxied-multi-host-tls/) | nginx SNI + per-host certs in front of a multi-agent edge |
+
 ## Command overview
 
 Everything lives under one binary, invoked as `coen <command>`.
@@ -389,18 +410,31 @@ ingress:
   tls:                      # ignored in proxied mode, where nginx owns the cert
     cert: /etc/coen/certs/public.crt
     key:  /etc/coen/certs/public.key
+  max_connections: 0        # global cap on concurrent ingress conns; 0 = unlimited
+  read_header_timeout: 10s  # bound on reading the HTTP request head; default 10s
+  idle_timeout: 0           # rolling idle deadline while streaming; 0 = disabled
 tunnel:
   listen: ":2636"           # mTLS server the agent dials
   ca:   /etc/coen/pki/ca.crt
   cert: /etc/coen/pki/edge.crt
   key:  /etc/coen/pki/edge.key
-  # allowed_agent_fingerprints: ["SHA256:..."]   # optional allow-list
+routes:                     # host -> owning agent (by client-cert fingerprint)
+  - host: app.example.com   # exact, "*.example.com" wildcard, or "*" default
+    agent_fingerprint: "SHA256:..."
+    max_connections: 0      # optional per-route cap; 0 = unlimited
+drain_timeout: 15s          # finish in-flight streams up to this long on shutdown
 log:
   level: info               # trace, debug, info, warn, or error
   format: text              # text or json
 admin:
   socket: /run/coen/edge.sock
 ```
+
+Routes may also be split into drop-in files under a `<name>.d/` directory next to
+the config (`edge.yaml` → `edge.d/`). Each drop-in is a routes-only fragment
+(`routes: [ ... ]`), merged in sorted filename order; a duplicate host across
+files is a load error. The fingerprint allowlist is derived from the routes — an
+agent whose fingerprint owns no route is refused.
 
 `agent.yaml`:
 
@@ -411,17 +445,24 @@ edge:
   cert: /etc/coen/pki/agent.crt
   key:  /etc/coen/pki/agent.key
   # edge_fingerprint: "SHA256:..."               # optional certificate pinning
-service:
-  address: 127.0.0.1:8080   # the local app to expose
+routes:                     # host -> local backend service
+  - host: app.example.com
+    service: 127.0.0.1:8080
 reconnect:
   min_backoff: 1s
   max_backoff: 30s
+drain_timeout: 15s          # finish in-flight streams up to this long on shutdown
 log:
   level: info
   format: text
 admin:
   socket: /run/coen/agent.sock
 ```
+
+Host matching precedence is **exact > wildcard (`*.suffix`) > default (`*`)**. A
+request whose `Host` matches no route gets a `404`; a matched route whose agent
+is offline gets a `502`; a connection over a cap gets a `503`. See
+[`examples/`](examples/) for worked configurations of every variant.
 
 ## Security model
 
@@ -432,8 +473,16 @@ holds a shared symmetric secret. To add an agent, issue a certificate; to remove
 or delete it.
 
 For defence in depth beyond CA trust, the agent can pin the edge's fingerprint
-(`edge_fingerprint`) and the edge can restrict connections to a set of
-`allowed_agent_fingerprints`.
+(`edge_fingerprint`), and host ownership at the edge is authoritative: each
+`routes` entry names the agent fingerprint that owns a hostname, and the set of
+those fingerprints is the connection allowlist. An agent whose fingerprint owns
+no route is refused, and an agent cannot serve a hostname it was not granted.
+
+Because the edge routes on the HTTP `Host` header, it parses the request head of
+each ingress connection (in both standalone and proxied modes it sees cleartext
+HTTP/1.x). This means the edge serves HTTP and WebSocket traffic, not arbitrary
+raw TCP; HTTP/2 at the edge is out of scope (the standalone listener does not
+advertise `h2`, so clients use HTTP/1.1).
 
 The systemd units ship with least privilege in mind. They run as a non-root `coen` user with
 `NoNewPrivileges`, `ProtectSystem=strict`, and a scoped `ReadWritePaths`. A standalone edge
@@ -482,15 +531,18 @@ sudo systemctl enable --now coen-agent     # on the private host
 
 ## Roadmap
 
-These are deliberately out of scope for the MVP. The architecture leaves room for them.
+Delivered:
 
-- [ ] Multi-route and multiple hostnames (host-based routing at the edge)
+- [x] Multi-route and multiple hostnames (host-based routing at the edge, across multiple agents)
+- [x] Public-listener hardening: ingress idle-deadlines, connection caps, lazy backend dial
+- [x] Bounded graceful draining of in-flight streams on shutdown
+
+Still planned (the architecture leaves room for them):
+
 - [ ] ACME and Let's Encrypt automatic certificates for standalone mode
 - [ ] Prometheus `/metrics` endpoint (the counters are already tracked internally)
-- [ ] Public-listener hardening: ingress idle-deadlines, connection caps, lazy backend dial
-- [ ] Bounded graceful draining of in-flight streams on shutdown
 - [ ] Tunnelling over `:443` (nginx `stream` with `ssl_preread`, or a WebSocket transport)
-- [ ] Multiple concurrent agents and load balancing; certificate rotation and revocation
+- [ ] Load balancing (multiple agents serving the same host); certificate rotation and revocation
 - [ ] QUIC and HTTP/3 transport option
 
 ## Contributing
