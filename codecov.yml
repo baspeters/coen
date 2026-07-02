@@ -1,4 +1,7 @@
 coverage:
+  precision: 1
+  round: down
+  range: "85...100"        # badge color: red below 85, green toward 100
   status:
     project:
       default:
@@ -12,7 +15,10 @@ comment:
   layout: "reach, diff, files"
   require_changes: false
 
-# The process entrypoint is a two-line main() that only calls cli.Execute();
-# it is exercised by the binary itself, not unit-testable in isolation.
+# Excluded from coverage scoring (integration-tested, not unit-testable in isolation):
+# - cmd/coen: the two-line main() that only calls cli.Execute().
+# - internal/cli/run.go: the daemon launch and POSIX-signal wiring (blocking
+#   Run loops, SIGHUP/SIGTERM handling), exercised by the e2e and smoke tests.
 ignore:
   - "cmd/coen"
+  - "internal/cli/run.go"
