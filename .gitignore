@@ -1,6 +1,8 @@
 /bin/
+/dist/
 *.out
 coverage.txt
+coverage.html
 
 # Personal working docs (spec and plan), kept out of Git
 docs/superpowers/
