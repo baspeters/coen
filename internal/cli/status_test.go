@@ -89,3 +89,35 @@ func TestStatusCommandHuman(t *testing.T) {
 		t.Fatalf("expected output to contain %q, got %q", "streams:", out)
 	}
 }
+
+func TestStatusCommandShowsAgents(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "s.sock")
+	srv := &admin.Server{
+		Snapshot: func() obs.Snapshot {
+			return obs.Snapshot{Agents: []obs.AgentInfo{{Fingerprint: "SHA256:abc", ConnectedSince: time.Now()}}}
+		},
+		SetLevel: func(slog.Level) error { return nil },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Serve(ctx, sock) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := admin.Status(sock); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("socket never came up")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	out, err := runCLI(t, "status", "--socket", sock, "--json=false")
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if !strings.Contains(out, "agents:") || !strings.Contains(out, "SHA256:abc") {
+		t.Fatalf("expected an agents block with the fingerprint, got %q", out)
+	}
+}

@@ -33,6 +33,12 @@ func newStatusCmd() *cobra.Command {
 				fmt.Fprintf(out, "since:      %s\n", snap.ConnectedSince.Format("2006-01-02 15:04:05"))
 				fmt.Fprintf(out, "peer_fp:    %s\n", snap.PeerFingerprint)
 			}
+			if len(snap.Agents) > 0 {
+				fmt.Fprintf(out, "agents:     %d connected\n", len(snap.Agents))
+				for _, ag := range snap.Agents {
+					fmt.Fprintf(out, "  - %s (since %s)\n", ag.Fingerprint, ag.ConnectedSince.Format("2006-01-02 15:04:05"))
+				}
+			}
 			fmt.Fprintf(out, "streams:    %d active / %d total\n", snap.ActiveStreams, snap.TotalStreams)
 			fmt.Fprintf(out, "bytes:      %d in / %d out\n", snap.BytesIn, snap.BytesOut)
 			fmt.Fprintf(out, "handshakes: %d ok / %d fail\n", snap.HandshakeOK, snap.HandshakeFail)
