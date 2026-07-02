@@ -1,0 +1,58 @@
+package edge
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"net"
+	"strings"
+
+	"github.com/baspeters/coen/internal/route"
+)
+
+const maxHeaderBytes = 64 << 10
+
+// readRequestHead reads an HTTP/1.x request head (up to and including the blank
+// line) without reserializing it, returning the raw bytes and the normalized
+// Host. It stops at maxBytes.
+func readRequestHead(r io.Reader, maxBytes int) (head []byte, host string, err error) {
+	buf := make([]byte, 0, 1024)
+	tmp := make([]byte, 512)
+	for {
+		n, rerr := r.Read(tmp)
+		if n > 0 {
+			buf = append(buf, tmp[:n]...)
+			if len(buf) > maxBytes {
+				return nil, "", fmt.Errorf("request head exceeds %d bytes", maxBytes)
+			}
+			if idx := bytes.Index(buf, []byte("\r\n\r\n")); idx >= 0 {
+				h, herr := parseHost(buf[:idx])
+				if herr != nil {
+					return nil, "", herr
+				}
+				return buf, h, nil
+			}
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				return nil, "", fmt.Errorf("incomplete request head")
+			}
+			return nil, "", rerr
+		}
+	}
+}
+
+func parseHost(head []byte) (string, error) {
+	lines := bytes.Split(head, []byte("\r\n"))
+	for _, ln := range lines[1:] { // skip the request line
+		if len(ln) >= 5 && strings.EqualFold(string(ln[:5]), "host:") {
+			return route.Normalize(strings.TrimSpace(string(ln[5:]))), nil
+		}
+	}
+	return "", fmt.Errorf("no Host header")
+}
+
+func writeStatus(conn net.Conn, code int, reason, body string) {
+	fmt.Fprintf(conn, "HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+		code, reason, len(body), body)
+}

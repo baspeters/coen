@@ -7,16 +7,21 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"sync/atomic"
 	"time"
 
 	"github.com/baspeters/coen/internal/config"
 	"github.com/baspeters/coen/internal/obs"
 	"github.com/baspeters/coen/internal/pki"
 	"github.com/baspeters/coen/internal/proxy"
+	"github.com/baspeters/coen/internal/route"
 	"github.com/baspeters/coen/internal/tunnel"
-	"github.com/hashicorp/yamux"
 )
+
+// routeState is the per-route value stored in the matcher: the owning agent
+// fingerprint (and, from Task 9, an optional per-route connection cap).
+type routeState struct {
+	fingerprint string
+}
 
 type Edge struct {
 	cfg     *config.EdgeConfig
@@ -24,7 +29,8 @@ type Edge struct {
 	state   *obs.State
 	tunTLS  *tls.Config
 	allowed map[string]bool
-	session atomic.Pointer[yamux.Session]
+	reg     *registry
+	routes  *route.Matcher[*routeState]
 }
 
 func New(cfg *config.EdgeConfig, log *slog.Logger, state *obs.State) (*Edge, error) {
@@ -40,10 +46,12 @@ func New(cfg *config.EdgeConfig, log *slog.Logger, state *obs.State) (*Edge, err
 	if err != nil {
 		return nil, fmt.Errorf("load edge cert: %w", err)
 	}
-	e := &Edge{cfg: cfg, log: log, state: state, tunTLS: tunnel.ServerTLSConfig(pool, cert), allowed: map[string]bool{}}
-	for _, fp := range cfg.Tunnel.AllowedAgentFingerprints {
-		e.allowed[fp] = true
+	e := &Edge{cfg: cfg, log: log, state: state, tunTLS: tunnel.ServerTLSConfig(pool, cert), allowed: cfg.AllowedFingerprints(), reg: newRegistry()}
+	entries := make([]route.Entry[*routeState], 0, len(cfg.Routes))
+	for _, r := range cfg.Routes {
+		entries = append(entries, route.Entry[*routeState]{Pattern: r.Host, Value: &routeState{fingerprint: r.AgentFingerprint}})
 	}
+	e.routes = route.Build(entries)
 	return e, nil
 }
 
@@ -83,12 +91,10 @@ func (e *Edge) Serve(ctx context.Context, tunLn, ingressLn net.Listener) error {
 		<-ctx.Done()
 		_ = tunLn.Close()
 		_ = ingressLn.Close()
-		if s := e.session.Load(); s != nil {
-			_ = s.Close()
-		}
 	}()
 	go e.acceptTunnel(ctx, tunLn)
 	e.acceptIngress(ctx, ingressLn)
+	e.reg.closeAll()
 	return nil
 }
 
@@ -133,15 +139,15 @@ func (e *Edge) serveAgent(conn net.Conn) {
 		return
 	}
 	e.state.HandshakeOK()
-	e.state.SetConnected(fp)
-	if prev := e.session.Swap(session); prev != nil {
+	if prev := e.reg.set(fp, session); prev != nil {
 		_ = prev.Close()
 	}
+	e.state.AgentConnected(fp)
 	e.log.Info("agent.connected", "peer_fp", fp)
 
 	<-session.CloseChan()
-	if e.session.CompareAndSwap(session, nil) {
-		e.state.SetDisconnected()
+	if e.reg.remove(fp, session) {
+		e.state.AgentDisconnected(fp)
 		e.log.Info("agent.disconnected", "peer_fp", fp)
 	}
 }
@@ -159,22 +165,41 @@ func (e *Edge) acceptIngress(ctx context.Context, ln net.Listener) {
 func (e *Edge) handleIngress(conn net.Conn) {
 	connID := obs.NewID()
 	log := e.log.With("conn_id", connID, "client_addr", conn.RemoteAddr().String())
-	log.Info("ingress.accept")
-	session := e.session.Load()
-	if session == nil {
-		log.Warn("ingress.no_agent")
-		writeBadGateway(conn)
+
+	head, host, err := readRequestHead(conn, maxHeaderBytes)
+	if err != nil {
+		log.Warn("ingress.bad_request", "error", err.Error())
+		writeStatus(conn, 400, "Bad Request", "coen: bad request\n")
 		_ = conn.Close()
 		return
 	}
+	log = log.With("host", host)
+	log.Info("ingress.accept")
+
+	rs, ok := e.routes.Match(host)
+	if !ok {
+		log.Warn("ingress.no_route")
+		writeStatus(conn, 404, "Not Found", "coen: no route for host\n")
+		_ = conn.Close()
+		return
+	}
+	session, ok := e.reg.get(rs.fingerprint)
+	if !ok {
+		log.Warn("ingress.no_agent", "agent_fp", rs.fingerprint)
+		writeStatus(conn, 502, "Bad Gateway", "coen: no agent connected\n")
+		_ = conn.Close()
+		return
+	}
+	// Lazy backend dial: the stream (and thus the agent's Dial) is opened only
+	// now that a complete, valid request head has arrived.
 	stream, err := session.OpenStream()
 	if err != nil {
 		log.Warn("stream.open_error", "error", err.Error())
-		writeBadGateway(conn)
+		writeStatus(conn, 502, "Bad Gateway", "coen: no agent connected\n")
 		_ = conn.Close()
 		return
 	}
-	if err := tunnel.WritePreamble(stream, tunnel.Preamble{ConnID: connID, ClientAddr: conn.RemoteAddr().String()}); err != nil {
+	if err := tunnel.WritePreamble(stream, tunnel.Preamble{ConnID: connID, ClientAddr: conn.RemoteAddr().String(), Host: host}); err != nil {
 		log.Warn("stream.preamble_error", "error", err.Error())
 		_ = stream.Close()
 		_ = conn.Close()
@@ -182,12 +207,7 @@ func (e *Edge) handleIngress(conn net.Conn) {
 	}
 	e.state.StreamOpened()
 	log.Debug("stream.open")
-	in, out, _ := proxy.Pipe(conn, stream)
+	in, out, _ := proxy.Pipe(proxy.WithPrefix(conn, head), stream)
 	e.state.StreamClosed(in, out)
 	log.Info("stream.closed", "bytes_in", in, "bytes_out", out)
-}
-
-func writeBadGateway(conn net.Conn) {
-	const body = "coen: no agent connected\n"
-	fmt.Fprintf(conn, "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
 }

@@ -4,7 +4,10 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -17,9 +20,28 @@ import (
 	"github.com/baspeters/coen/internal/config"
 	"github.com/baspeters/coen/internal/obs"
 	"github.com/baspeters/coen/internal/pki"
+	"github.com/baspeters/coen/internal/route"
 	"github.com/baspeters/coen/internal/tunnel"
 	"github.com/hashicorp/yamux"
 )
+
+// fingerprintOf computes the client-cert fingerprint the edge would derive for
+// a route, from an issued cert PEM.
+func fingerprintOf(t *testing.T, certPEM []byte) string {
+	t.Helper()
+	blk, _ := pem.Decode(certPEM)
+	if blk == nil {
+		t.Fatal("decode cert PEM")
+	}
+	leaf, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pki.Fingerprint(leaf)
+}
+
+// agentsConnected reports how many agents the edge state currently shows.
+func agentsConnected(e *Edge) int { return len(e.state.Snapshot().Agents) }
 
 func newTestEdge(t *testing.T) (e *Edge, tunLn, ingressLn net.Listener, agentTLS *tls.Config) {
 	t.Helper()
@@ -36,9 +58,13 @@ func newTestEdge(t *testing.T) (e *Edge, tunLn, ingressLn net.Listener, agentTLS
 	_ = os.WriteFile(certPath, ecPEM, 0o600)
 	_ = os.WriteFile(keyPath, ekPEM, 0o600)
 
+	acPEM, akPEM, _ := ca.IssueClient("agent-1")
+	agentFP := fingerprintOf(t, acPEM)
+
 	cfg := &config.EdgeConfig{
 		Ingress: config.IngressConfig{Mode: "proxied", Listen: "127.0.0.1:0"},
 		Tunnel:  config.TunnelServerConfig{Listen: "127.0.0.1:0", CA: caPath, Cert: certPath, Key: keyPath},
+		Routes:  []config.EdgeRoute{{Host: "*", AgentFingerprint: agentFP}},
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	e, err = New(cfg, log, &obs.State{})
@@ -52,7 +78,6 @@ func newTestEdge(t *testing.T) (e *Edge, tunLn, ingressLn net.Listener, agentTLS
 	tunLn = tls.NewListener(tcp, tunnel.ServerTLSConfig(pool, edgeCert))
 	ingressLn, _ = net.Listen("tcp", "127.0.0.1:0")
 
-	acPEM, akPEM, _ := ca.IssueClient("agent-1")
 	agentCert, _ := tls.X509KeyPair(acPEM, akPEM)
 	agentTLS = tunnel.ClientTLSConfig(pool, agentCert, "127.0.0.1")
 	return e, tunLn, ingressLn, agentTLS
@@ -71,7 +96,7 @@ func TestEdgeReturns502WithoutAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	_, _ = io.WriteString(conn, "GET / HTTP/1.0\r\n\r\n")
+	_, _ = io.WriteString(conn, "GET / HTTP/1.1\r\nHost: app.example.com\r\n\r\n")
 	resp, _ := io.ReadAll(conn)
 	if !strings.Contains(string(resp), "502 Bad Gateway") {
 		t.Fatalf("expected 502, got %q", resp)
@@ -114,7 +139,7 @@ func TestEdgeRoutesToAgent(t *testing.T) {
 	}()
 
 	deadline := time.Now().Add(2 * time.Second)
-	for e.session.Load() == nil {
+	for e.reg.size() == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("agent never registered")
 		}
@@ -126,15 +151,16 @@ func TestEdgeRoutesToAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	_, _ = io.WriteString(conn, "GET / HTTP/1.0\r\n\r\n")
+	_, _ = io.WriteString(conn, "GET / HTTP/1.1\r\nHost: app.example.com\r\n\r\n")
 	resp, _ := io.ReadAll(conn)
 	if !strings.Contains(string(resp), "200 OK") {
 		t.Fatalf("expected 200, got %q", resp)
 	}
 }
 
-// newTestEdgeWithAllowlist is like newTestEdge but lets the caller set
-// cfg.Tunnel.AllowedAgentFingerprints before the edge is constructed.
+// newTestEdgeWithAllowlist is like newTestEdge but derives the edge's fingerprint
+// allowlist from routes owned by the given fingerprints (the edge-authoritative
+// model), so an agent whose fingerprint is absent is rejected.
 func newTestEdgeWithAllowlist(t *testing.T, allowed []string) (e *Edge, tunLn, ingressLn net.Listener, agentTLS *tls.Config) {
 	t.Helper()
 	ca, err := pki.CreateCA()
@@ -150,15 +176,18 @@ func newTestEdgeWithAllowlist(t *testing.T, allowed []string) (e *Edge, tunLn, i
 	_ = os.WriteFile(certPath, ecPEM, 0o600)
 	_ = os.WriteFile(keyPath, ekPEM, 0o600)
 
+	routes := make([]config.EdgeRoute, len(allowed))
+	for i, fp := range allowed {
+		host := "*"
+		if i > 0 {
+			host = fmt.Sprintf("h%d.example.com", i)
+		}
+		routes[i] = config.EdgeRoute{Host: host, AgentFingerprint: fp}
+	}
 	cfg := &config.EdgeConfig{
 		Ingress: config.IngressConfig{Mode: "proxied", Listen: "127.0.0.1:0"},
-		Tunnel: config.TunnelServerConfig{
-			Listen:                   "127.0.0.1:0",
-			CA:                       caPath,
-			Cert:                     certPath,
-			Key:                      keyPath,
-			AllowedAgentFingerprints: allowed,
-		},
+		Tunnel:  config.TunnelServerConfig{Listen: "127.0.0.1:0", CA: caPath, Cert: certPath, Key: keyPath},
+		Routes:  routes,
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	e, err = New(cfg, log, &obs.State{})
@@ -202,18 +231,18 @@ func TestEdgeRejectsAgentNotOnAllowlist(t *testing.T) {
 
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		if e.session.Load() != nil {
+		if e.reg.size() != 0 {
 			t.Fatal("agent was admitted despite not being on the allow-list")
 		}
-		if e.state.Snapshot().TunnelConnected {
+		if agentsConnected(e) > 0 {
 			t.Fatal("state reports connected despite agent not being on the allow-list")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if e.session.Load() != nil {
+	if e.reg.size() != 0 {
 		t.Fatal("agent was admitted despite not being on the allow-list")
 	}
-	if e.state.Snapshot().TunnelConnected {
+	if agentsConnected(e) > 0 {
 		t.Fatal("state reports connected despite agent not being on the allow-list")
 	}
 }
@@ -249,13 +278,13 @@ func TestEdgeReconnectDoesNotFlipStateToDisconnected(t *testing.T) {
 	}()
 
 	deadline := time.Now().Add(2 * time.Second)
-	for e.session.Load() == nil || !e.state.Snapshot().TunnelConnected {
+	for e.reg.size() == 0 || agentsConnected(e) == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("agent #1 never registered")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	firstSession := e.session.Load()
+	firstSession := e.reg.any()
 
 	// Stub agent #2: connect, replacing agent #1's session (the edge closes
 	// #1's session as part of admitting #2).
@@ -269,7 +298,7 @@ func TestEdgeReconnectDoesNotFlipStateToDisconnected(t *testing.T) {
 
 	deadline = time.Now().Add(2 * time.Second)
 	for {
-		cur := e.session.Load()
+		cur := e.reg.any()
 		if cur != nil && cur != firstSession {
 			break
 		}
@@ -284,10 +313,10 @@ func TestEdgeReconnectDoesNotFlipStateToDisconnected(t *testing.T) {
 	// from its now-closed session.
 	pollDeadline := time.Now().Add(1 * time.Second)
 	for time.Now().Before(pollDeadline) {
-		if !e.state.Snapshot().TunnelConnected {
+		if agentsConnected(e) == 0 {
 			t.Fatal("TunnelConnected flipped false after agent #2 replaced agent #1")
 		}
-		if e.session.Load() == nil {
+		if e.reg.any() == nil {
 			t.Fatal("session became nil after agent #2 replaced agent #1")
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -319,7 +348,7 @@ func TestEdgeClosesAgentSessionOnShutdown(t *testing.T) {
 	}()
 
 	deadline := time.Now().Add(2 * time.Second)
-	for e.session.Load() == nil {
+	for e.reg.size() == 0 {
 		if time.Now().After(deadline) {
 			cancel()
 			t.Fatal("agent never registered")
@@ -329,7 +358,7 @@ func TestEdgeClosesAgentSessionOnShutdown(t *testing.T) {
 
 	cancel()
 	deadline = time.Now().Add(2 * time.Second)
-	for e.state.Snapshot().TunnelConnected {
+	for agentsConnected(e) > 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("edge did not tear down the agent session / clear state on shutdown")
 		}
@@ -523,7 +552,7 @@ func TestServeAgentFailedHandshakeNoClientCert(t *testing.T) {
 		t.Fatal("serveAgent did not return after a failed handshake")
 	}
 
-	if e.session.Load() != nil {
+	if e.reg.size() != 0 {
 		t.Fatal("session should remain nil after a failed handshake")
 	}
 	if got := e.state.Snapshot().HandshakeFail; got != 1 {
@@ -642,4 +671,63 @@ func TestNewMismatchedCertKeyPair(t *testing.T) {
 	if _, err := New(cfg, log, &obs.State{}); err == nil {
 		t.Fatal("expected error for a mismatched cert/key pair")
 	}
+}
+
+func TestHandleIngressRoutesByHost(t *testing.T) {
+	// Two "agents" behind yamux over net.Pipe, registered under two fingerprints.
+	srvA, cliA := newServerSession(t)
+	srvB, cliB := newServerSession(t)
+	defer cliA.Close()
+	defer cliB.Close()
+
+	e := &Edge{
+		log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		state: &obs.State{},
+		reg:   newRegistry(),
+		routes: route.Build([]route.Entry[*routeState]{
+			{Pattern: "app.example.com", Value: &routeState{fingerprint: "FP-A"}},
+			{Pattern: "api.example.com", Value: &routeState{fingerprint: "FP-B"}},
+		}),
+	}
+	e.reg.set("FP-A", srvA)
+	e.reg.set("FP-B", srvB)
+
+	// Agent A echoes the preamble host; assert it is hit for app.example.com.
+	go func() {
+		st, err := cliA.AcceptStream()
+		if err != nil {
+			return
+		}
+		p, _ := tunnel.ReadPreamble(st)
+		_, _ = st.Write([]byte("HOST=" + p.Host))
+		_ = st.Close()
+	}()
+
+	client, edgeConn := net.Pipe()
+	go e.handleIngress(edgeConn)
+	go func() {
+		_, _ = client.Write([]byte("GET / HTTP/1.1\r\nHost: app.example.com\r\n\r\n"))
+	}()
+	buf := make([]byte, 64)
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, err := client.Read(buf)
+	if err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+	if got := string(buf[:n]); got != "HOST=app.example.com" {
+		t.Fatalf("echo = %q, want HOST=app.example.com", got)
+	}
+	_ = client.Close()
+
+	// Unknown host -> 404.
+	c2, edge2 := net.Pipe()
+	go e.handleIngress(edge2)
+	go func() { _, _ = c2.Write([]byte("GET / HTTP/1.1\r\nHost: nope.org\r\n\r\n")) }()
+	resp := make([]byte, 64)
+	_ = c2.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, _ = c2.Read(resp)
+	if !strings.Contains(string(resp[:n]), "404") {
+		t.Fatalf("expected 404, got %q", resp[:n])
+	}
+	_ = c2.Close()
 }
