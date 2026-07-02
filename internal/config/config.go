@@ -63,11 +63,10 @@ type AgentRoute struct {
 }
 
 type TunnelServerConfig struct {
-	Listen                   string   `yaml:"listen"`
-	CA                       string   `yaml:"ca"`
-	Cert                     string   `yaml:"cert"`
-	Key                      string   `yaml:"key"`
-	AllowedAgentFingerprints []string `yaml:"allowed_agent_fingerprints"`
+	Listen string `yaml:"listen"`
+	CA     string `yaml:"ca"`
+	Cert   string `yaml:"cert"`
+	Key    string `yaml:"key"`
 }
 
 type EdgeConfig struct {
@@ -97,10 +96,6 @@ type EdgeRef struct {
 	EdgeFingerprint string `yaml:"edge_fingerprint"`
 }
 
-type ServiceConfig struct {
-	Address string `yaml:"address"`
-}
-
 type ReconnectConfig struct {
 	MinBackoff Duration `yaml:"min_backoff"`
 	MaxBackoff Duration `yaml:"max_backoff"`
@@ -109,7 +104,6 @@ type ReconnectConfig struct {
 type AgentConfig struct {
 	Edge      EdgeRef         `yaml:"edge"`
 	Routes    []AgentRoute    `yaml:"routes"`
-	Service   ServiceConfig   `yaml:"service"` // deprecated; removed in Task 12
 	Reconnect ReconnectConfig `yaml:"reconnect"`
 	Drain     Duration        `yaml:"drain_timeout"`
 	Log       LogConfig       `yaml:"log"`
