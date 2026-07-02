@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
@@ -24,6 +26,20 @@ import (
 	"github.com/baspeters/coen/internal/pki"
 	"github.com/baspeters/coen/internal/tunnel"
 )
+
+// fingerprintOf derives the edge-side route fingerprint for an issued client cert.
+func fingerprintOf(t *testing.T, certPEM []byte) string {
+	t.Helper()
+	blk, _ := pem.Decode(certPEM)
+	if blk == nil {
+		t.Fatal("decode cert PEM")
+	}
+	leaf, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pki.Fingerprint(leaf)
+}
 
 type syncBuf struct {
 	mu sync.Mutex
@@ -78,13 +94,22 @@ func serveBackend(c net.Conn) {
 	fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
 }
 
-// startStack wires backend + edge + agent and returns the ingress address.
-// If ingressTLS is non-nil the ingress terminates TLS (standalone mode);
-// otherwise it is plaintext (proxied mode).
+// startStack wires a single backend under a catch-all route and returns the
+// ingress address. If ingressTLS is non-nil the ingress terminates TLS
+// (standalone mode); otherwise it is plaintext (proxied mode).
 func startStack(t *testing.T, ingressTLS *tls.Config) (ingressAddr string, edgeBuf, agentBuf *syncBuf) {
 	t.Helper()
 	backend := startBackend(t)
+	return buildStack(t, ingressTLS,
+		[]string{"*"},
+		[]config.AgentRoute{{Host: "*", Service: backend.Addr().String()}})
+}
 
+// buildStack wires edge + agent with the given edge host patterns (all owned by
+// the single test agent) and agent host->backend routes, then waits for the
+// tunnel to register. It returns the ingress address and the log buffers.
+func buildStack(t *testing.T, ingressTLS *tls.Config, edgeHosts []string, agentRoutes []config.AgentRoute) (ingressAddr string, edgeBuf, agentBuf *syncBuf) {
+	t.Helper()
 	ca, err := pki.CreateCA()
 	if err != nil {
 		t.Fatal(err)
@@ -97,6 +122,7 @@ func startStack(t *testing.T, ingressTLS *tls.Config) (ingressAddr string, edgeB
 	acPEM, akPEM, _ := ca.IssueClient("agent-1")
 	agentCertPath := writeFile(t, dir, "agent.crt", acPEM)
 	agentKeyPath := writeFile(t, dir, "agent.key", akPEM)
+	agentFP := fingerprintOf(t, acPEM)
 
 	pool, _ := pki.CertPoolFromPEM(ca.CertPEM())
 	edgeCert, _ := tls.X509KeyPair(ecPEM, ekPEM)
@@ -106,9 +132,14 @@ func startStack(t *testing.T, ingressTLS *tls.Config) (ingressAddr string, edgeB
 	agentLog, _, _ := obs.NewLogger("debug", "text", agentBuf)
 	var edgeState, agentState obs.State
 
+	edgeRoutes := make([]config.EdgeRoute, len(edgeHosts))
+	for i, h := range edgeHosts {
+		edgeRoutes[i] = config.EdgeRoute{Host: h, AgentFingerprint: agentFP}
+	}
 	edgeCfg := &config.EdgeConfig{
 		Ingress: config.IngressConfig{Mode: "proxied"},
 		Tunnel:  config.TunnelServerConfig{CA: caPath, Cert: edgeCertPath, Key: edgeKeyPath},
+		Routes:  edgeRoutes,
 	}
 	e, err := edge.New(edgeCfg, edgeLog, &edgeState)
 	if err != nil {
@@ -129,7 +160,7 @@ func startStack(t *testing.T, ingressTLS *tls.Config) (ingressAddr string, edgeB
 
 	agentCfg := &config.AgentConfig{
 		Edge:      config.EdgeRef{Address: tunLn.Addr().String(), CA: caPath, Cert: agentCertPath, Key: agentKeyPath},
-		Service:   config.ServiceConfig{Address: backend.Addr().String()},
+		Routes:    agentRoutes,
 		Reconnect: config.ReconnectConfig{MinBackoff: config.Duration(10 * time.Millisecond), MaxBackoff: config.Duration(100 * time.Millisecond)},
 	}
 	a, err := agent.New(agentCfg, agentLog, &agentState)
@@ -139,7 +170,7 @@ func startStack(t *testing.T, ingressTLS *tls.Config) (ingressAddr string, edgeB
 	go func() { _ = a.Run(ctx) }()
 
 	deadline := time.Now().Add(3 * time.Second)
-	for !edgeState.Snapshot().TunnelConnected {
+	for len(edgeState.Snapshot().Agents) == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("tunnel never connected")
 		}
@@ -225,5 +256,65 @@ func TestEndToEndStandaloneTLS(t *testing.T) {
 	resp, _ := io.ReadAll(client)
 	if !strings.Contains(string(resp), "hello from backend") {
 		t.Fatalf("standalone TLS response: %q", resp)
+	}
+}
+
+// startBackendBody is a minimal HTTP backend that answers every request with a
+// fixed body, used to distinguish which backend a host routed to.
+func startBackendBody(t *testing.T, body string) net.Listener {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				if _, err := http.ReadRequest(bufio.NewReader(c)); err != nil {
+					return
+				}
+				fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
+			}(c)
+		}
+	}()
+	return ln
+}
+
+func TestEndToEndHostRouting(t *testing.T) {
+	appBackend := startBackendBody(t, "backend-app")
+	apiBackend := startBackendBody(t, "backend-api")
+
+	addr, _, _ := buildStack(t, nil,
+		[]string{"app.example.com", "api.example.com"},
+		[]config.AgentRoute{
+			{Host: "app.example.com", Service: appBackend.Addr().String()},
+			{Host: "api.example.com", Service: apiBackend.Addr().String()},
+		})
+
+	get := func(host string) string {
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		fmt.Fprintf(conn, "GET / HTTP/1.0\r\nHost: %s\r\n\r\n", host)
+		resp, _ := io.ReadAll(conn)
+		return string(resp)
+	}
+
+	if got := get("app.example.com"); !strings.Contains(got, "backend-app") {
+		t.Fatalf("app.example.com routed wrong: %q", got)
+	}
+	if got := get("api.example.com"); !strings.Contains(got, "backend-api") {
+		t.Fatalf("api.example.com routed wrong: %q", got)
+	}
+	// A host with no route gets a 404 from the edge.
+	if got := get("unknown.example.com"); !strings.Contains(got, "404") {
+		t.Fatalf("unknown host should 404, got: %q", got)
 	}
 }
