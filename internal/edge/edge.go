@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/baspeters/coen/internal/config"
+	"github.com/baspeters/coen/internal/errpage"
 	"github.com/baspeters/coen/internal/obs"
 	"github.com/baspeters/coen/internal/pki"
 	"github.com/baspeters/coen/internal/proxy"
@@ -198,7 +199,7 @@ func (e *Edge) handleIngress(conn net.Conn) {
 
 	if !e.sem.tryAcquire() {
 		log.Warn("ingress.rejected", "reason", "max_connections")
-		writeStatus(conn, 503, "Service Unavailable", "coen: too many connections\n")
+		errpage.Write(conn, 503, "Service Unavailable", "Too many connections", connID)
 		_ = conn.Close()
 		return
 	}
@@ -210,7 +211,7 @@ func (e *Edge) handleIngress(conn net.Conn) {
 	head, host, err := readRequestHead(conn, maxHeaderBytes)
 	if err != nil {
 		log.Warn("ingress.bad_request", "error", err.Error())
-		writeStatus(conn, 400, "Bad Request", "coen: bad request\n")
+		errpage.Write(conn, 400, "Bad Request", "Malformed request", connID)
 		_ = conn.Close()
 		return
 	}
@@ -221,13 +222,13 @@ func (e *Edge) handleIngress(conn net.Conn) {
 	rs, ok := e.routes.Match(host)
 	if !ok {
 		log.Warn("ingress.no_route")
-		writeStatus(conn, 404, "Not Found", "coen: no route for host\n")
+		errpage.Write(conn, 404, "Not Found", "No route for host", connID)
 		_ = conn.Close()
 		return
 	}
 	if !rs.sem.tryAcquire() {
 		log.Warn("ingress.rejected", "reason", "route_max_connections")
-		writeStatus(conn, 503, "Service Unavailable", "coen: too many connections\n")
+		errpage.Write(conn, 503, "Service Unavailable", "Too many connections", connID)
 		_ = conn.Close()
 		return
 	}
@@ -236,7 +237,7 @@ func (e *Edge) handleIngress(conn net.Conn) {
 	session, ok := e.reg.get(rs.fingerprint)
 	if !ok {
 		log.Warn("ingress.no_agent", "agent_fp", rs.fingerprint)
-		writeStatus(conn, 502, "Bad Gateway", "coen: no agent connected\n")
+		errpage.Write(conn, 502, "Bad Gateway", "No agent connected", connID)
 		_ = conn.Close()
 		return
 	}
@@ -245,7 +246,7 @@ func (e *Edge) handleIngress(conn net.Conn) {
 	stream, err := session.OpenStream()
 	if err != nil {
 		log.Warn("stream.open_error", "error", err.Error())
-		writeStatus(conn, 502, "Bad Gateway", "coen: no agent connected\n")
+		errpage.Write(conn, 502, "Bad Gateway", "No agent connected", connID)
 		_ = conn.Close()
 		return
 	}

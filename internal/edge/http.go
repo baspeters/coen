@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"net"
 	"strings"
 
 	"github.com/baspeters/coen/internal/route"
@@ -50,9 +49,4 @@ func parseHost(head []byte) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("no Host header")
-}
-
-func writeStatus(conn net.Conn, code int, reason, body string) {
-	fmt.Fprintf(conn, "HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
-		code, reason, len(body), body)
 }

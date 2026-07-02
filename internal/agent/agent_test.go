@@ -686,7 +686,7 @@ func TestHandleStreamNoRouteReturns502(t *testing.T) {
 	}
 	// A host the agent has no backend for gets a 502, not an empty reply.
 	got := readStreamResponse(t, client)
-	if !strings.Contains(got, "502 Bad Gateway") || !strings.Contains(got, "coen: no backend for host") {
+	if !strings.Contains(got, "502 Bad Gateway") || !strings.Contains(got, "No backend for host") {
 		t.Fatalf("expected a 502 response, got %q", got)
 	}
 	_ = client.Close()
@@ -712,7 +712,7 @@ func TestHandleStreamBackendUnreachableReturns502(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := readStreamResponse(t, client)
-	if !strings.Contains(got, "502 Bad Gateway") || !strings.Contains(got, "coen: backend unreachable") {
+	if !strings.Contains(got, "502 Bad Gateway") || !strings.Contains(got, "Backend unreachable") {
 		t.Fatalf("expected a 502 response when the backend is down, got %q", got)
 	}
 	_ = client.Close()
