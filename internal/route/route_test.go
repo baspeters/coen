@@ -39,7 +39,7 @@ func TestMatchPrecedence(t *testing.T) {
 		val string
 		ok  bool
 	}{
-		"app.example.com":     {"exact", true},    // exact beats wildcard
+		"app.example.com":     {"exact", true},     // exact beats wildcard
 		"foo.example.com":     {"wild", true},      // wildcard
 		"foo.sub.example.com": {"wild-long", true}, // longest suffix wins
 		"other.org":           {"default", true},   // default
