@@ -176,6 +176,9 @@ func (e *Edge) handleIngress(conn net.Conn) {
 	}
 	defer e.sem.release()
 
+	if to := e.cfg.Ingress.ReadHeaderTimeout.Duration(); to > 0 {
+		_ = conn.SetReadDeadline(time.Now().Add(to))
+	}
 	head, host, err := readRequestHead(conn, maxHeaderBytes)
 	if err != nil {
 		log.Warn("ingress.bad_request", "error", err.Error())
@@ -183,6 +186,7 @@ func (e *Edge) handleIngress(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
+	_ = conn.SetReadDeadline(time.Time{}) // clear before streaming
 	log = log.With("host", host)
 	log.Info("ingress.accept")
 
@@ -225,7 +229,8 @@ func (e *Edge) handleIngress(conn net.Conn) {
 	}
 	e.state.StreamOpened()
 	log.Debug("stream.open")
-	in, out, _ := proxy.Pipe(proxy.WithPrefix(conn, head), stream)
+	client := proxy.NewIdleConn(conn, e.cfg.Ingress.IdleTimeout.Duration())
+	in, out, _ := proxy.Pipe(proxy.WithPrefix(client, head), stream)
 	e.state.StreamClosed(in, out)
 	log.Info("stream.closed", "bytes_in", in, "bytes_out", out)
 }

@@ -681,6 +681,7 @@ func TestHandleIngressRoutesByHost(t *testing.T) {
 	defer cliB.Close()
 
 	e := &Edge{
+		cfg:   &config.EdgeConfig{},
 		log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		state: &obs.State{},
 		reg:   newRegistry(),
@@ -734,6 +735,7 @@ func TestHandleIngressRoutesByHost(t *testing.T) {
 
 func TestGlobalConnectionCap(t *testing.T) {
 	e := &Edge{
+		cfg:   &config.EdgeConfig{},
 		log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		state: &obs.State{},
 		reg:   newRegistry(),
@@ -763,6 +765,7 @@ func TestPerRouteConnectionCap(t *testing.T) {
 	defer cli.Close()
 	rs := &routeState{fingerprint: "FP", sem: newSemaphore(1)}
 	e := &Edge{
+		cfg:    &config.EdgeConfig{},
 		log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		state:  &obs.State{},
 		reg:    newRegistry(),
@@ -781,6 +784,30 @@ func TestPerRouteConnectionCap(t *testing.T) {
 	n, _ := client.Read(buf)
 	if !strings.Contains(string(buf[:n]), "503") {
 		t.Fatalf("expected 503 from per-route cap, got %q", buf[:n])
+	}
+	_ = client.Close()
+}
+
+func TestReadHeaderTimeout(t *testing.T) {
+	e := &Edge{
+		cfg:    &config.EdgeConfig{Ingress: config.IngressConfig{ReadHeaderTimeout: config.Duration(50 * time.Millisecond)}},
+		log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		state:  &obs.State{},
+		reg:    newRegistry(),
+		routes: route.Build([]route.Entry[*routeState]{{Pattern: "*", Value: &routeState{fingerprint: "FP"}}}),
+	}
+	client, edgeConn := net.Pipe()
+	go e.handleIngress(edgeConn)
+	// Never send a complete head; expect a 400 once the deadline fires.
+	go func() { _, _ = client.Write([]byte("GET / HTTP/1.1\r\nHost: x")) }()
+	buf := make([]byte, 64)
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, err := client.Read(buf)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(string(buf[:n]), "400") {
+		t.Fatalf("expected 400 after header timeout, got %q", buf[:n])
 	}
 	_ = client.Close()
 }
