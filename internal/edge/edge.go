@@ -82,6 +82,9 @@ func (e *Edge) Serve(ctx context.Context, tunLn, ingressLn net.Listener) error {
 		<-ctx.Done()
 		_ = tunLn.Close()
 		_ = ingressLn.Close()
+		if s := e.session.Load(); s != nil {
+			_ = s.Close()
+		}
 	}()
 	go e.acceptTunnel(ctx, tunLn)
 	e.acceptIngress(ctx, ingressLn)

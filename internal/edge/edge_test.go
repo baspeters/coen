@@ -130,3 +130,42 @@ func TestEdgeRoutesToAgent(t *testing.T) {
 		t.Fatalf("expected 200, got %q", resp)
 	}
 }
+
+func TestEdgeClosesAgentSessionOnShutdown(t *testing.T) {
+	e, tunLn, ingressLn, agentTLS := newTestEdge(t)
+	defer tunLn.Close()
+	defer ingressLn.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { _ = e.Serve(ctx, tunLn, ingressLn) }()
+
+	// Stub agent: connect, establish a session, stay idle until the edge closes it.
+	go func() {
+		raw, err := tls.Dial("tcp", tunLn.Addr().String(), agentTLS)
+		if err != nil {
+			return
+		}
+		sess, err := tunnel.ClientSession(raw)
+		if err != nil {
+			return
+		}
+		<-sess.CloseChan()
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for e.session.Load() == nil {
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("agent never registered")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	deadline = time.Now().Add(2 * time.Second)
+	for e.state.Snapshot().TunnelConnected {
+		if time.Now().After(deadline) {
+			t.Fatal("edge did not tear down the agent session / clear state on shutdown")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
