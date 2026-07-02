@@ -2,5 +2,8 @@
 *.out
 coverage.txt
 
-# Personal working docs (spec/plan) — not part of the project
+# Personal working docs (spec and plan), kept out of Git
 docs/superpowers/
+
+# Local agent instructions holding internal infrastructure details, not for publication
+CLAUDE.md
