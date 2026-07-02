@@ -40,6 +40,9 @@ tunnel:
   ca: %s
   cert: %s
   key: %s
+routes:
+  - host: "*"
+    agent_fingerprint: "AA"
 log:
   level: debug
   format: text
@@ -71,8 +74,9 @@ edge:
   ca: /a
   cert: /b
   key: /c
-service:
-  address: 127.0.0.1:8080
+routes:
+  - host: "*"
+    service: 127.0.0.1:8080
 log:
   level: warn
   format: text
@@ -199,6 +203,9 @@ tunnel:
   ca: %s
   cert: %s
   key: %s
+routes:
+  - host: "*"
+    agent_fingerprint: "AA"
 log:
   level: info
   format: text

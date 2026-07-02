@@ -4,11 +4,20 @@ ingress:
   tls:
     cert: /etc/coen/certs/public.crt
     key:  /etc/coen/certs/public.key
+  max_connections: 0        # global cap on concurrent ingress conns; 0 = unlimited
+  read_header_timeout: 10s  # bound on reading the HTTP request head
+  idle_timeout: 0           # rolling idle deadline while streaming; 0 = disabled
 tunnel:
   listen: ":2636"
   ca:   /etc/coen/pki/ca.crt
   cert: /etc/coen/pki/edge.crt
   key:  /etc/coen/pki/edge.key
+routes:
+  # each host is owned by exactly one agent (by client-cert fingerprint).
+  - host: app.example.com
+    agent_fingerprint: "REPLACE_WITH_AGENT_FINGERPRINT"
+    max_connections: 0      # optional per-route cap; 0 = unlimited
+drain_timeout: 15s          # finish in-flight streams up to this long on shutdown
 log:
   level: info
   format: text

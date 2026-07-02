@@ -40,9 +40,26 @@ type TLSFiles struct {
 }
 
 type IngressConfig struct {
-	Mode   string   `yaml:"mode"`
-	Listen string   `yaml:"listen"`
-	TLS    TLSFiles `yaml:"tls"`
+	Mode              string   `yaml:"mode"`
+	Listen            string   `yaml:"listen"`
+	TLS               TLSFiles `yaml:"tls"`
+	MaxConnections    int      `yaml:"max_connections"`
+	ReadHeaderTimeout Duration `yaml:"read_header_timeout"`
+	IdleTimeout       Duration `yaml:"idle_timeout"`
+}
+
+// EdgeRoute maps a host pattern to the agent (by client-cert fingerprint) that
+// owns it. Host ownership is edge-authoritative.
+type EdgeRoute struct {
+	Host             string `yaml:"host"`
+	AgentFingerprint string `yaml:"agent_fingerprint"`
+	MaxConnections   int    `yaml:"max_connections"`
+}
+
+// AgentRoute maps a host pattern to a local backend service address.
+type AgentRoute struct {
+	Host    string `yaml:"host"`
+	Service string `yaml:"service"`
 }
 
 type TunnelServerConfig struct {
@@ -56,8 +73,20 @@ type TunnelServerConfig struct {
 type EdgeConfig struct {
 	Ingress IngressConfig      `yaml:"ingress"`
 	Tunnel  TunnelServerConfig `yaml:"tunnel"`
+	Routes  []EdgeRoute        `yaml:"routes"`
+	Drain   Duration           `yaml:"drain_timeout"`
 	Log     LogConfig          `yaml:"log"`
 	Admin   AdminConfig        `yaml:"admin"`
+}
+
+// AllowedFingerprints derives the set of agent fingerprints permitted to connect
+// from the configured routes.
+func (c *EdgeConfig) AllowedFingerprints() map[string]bool {
+	m := make(map[string]bool, len(c.Routes))
+	for _, r := range c.Routes {
+		m[r.AgentFingerprint] = true
+	}
+	return m
 }
 
 type EdgeRef struct {
@@ -79,8 +108,10 @@ type ReconnectConfig struct {
 
 type AgentConfig struct {
 	Edge      EdgeRef         `yaml:"edge"`
-	Service   ServiceConfig   `yaml:"service"`
+	Routes    []AgentRoute    `yaml:"routes"`
+	Service   ServiceConfig   `yaml:"service"` // deprecated; removed in Task 12
 	Reconnect ReconnectConfig `yaml:"reconnect"`
+	Drain     Duration        `yaml:"drain_timeout"`
 	Log       LogConfig       `yaml:"log"`
 	Admin     AdminConfig     `yaml:"admin"`
 }

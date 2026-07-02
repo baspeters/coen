@@ -57,6 +57,9 @@ tunnel:
   ca: %s
   cert: %s
   key: %s
+routes:
+  - host: "*"
+    agent_fingerprint: "AA"
 `, caPath, certPath, keyPath)
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -92,8 +95,9 @@ edge:
   ca: /no/such/ca.crt
   cert: /no/such/agent.crt
   key: /no/such/agent.key
-service:
-  address: 127.0.0.1:1
+routes:
+  - host: "*"
+    service: 127.0.0.1:1
 `
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
