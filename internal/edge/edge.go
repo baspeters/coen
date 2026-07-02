@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"sync/atomic"
+	"time"
 
 	"github.com/baspeters/coen/internal/config"
 	"github.com/baspeters/coen/internal/obs"
@@ -101,18 +102,24 @@ func (e *Edge) acceptTunnel(ctx context.Context, ln net.Listener) {
 	}
 }
 
+// handshakeTimeout bounds the TLS handshake on the internet-facing tunnel
+// listener so an unauthenticated peer cannot pin a goroutine/fd indefinitely.
+const handshakeTimeout = 10 * time.Second
+
 func (e *Edge) serveAgent(conn net.Conn) {
 	tlsConn, ok := conn.(*tls.Conn)
 	if !ok {
 		_ = conn.Close()
 		return
 	}
+	_ = tlsConn.SetDeadline(time.Now().Add(handshakeTimeout))
 	if err := tlsConn.Handshake(); err != nil {
 		e.state.HandshakeFail()
 		e.log.Warn("agent.tls_handshake", "verify_result", "fail", "error", err.Error())
 		_ = conn.Close()
 		return
 	}
+	_ = tlsConn.SetDeadline(time.Time{})
 	fp := pki.Fingerprint(tlsConn.ConnectionState().PeerCertificates[0])
 	if len(e.allowed) > 0 && !e.allowed[fp] {
 		e.state.HandshakeFail()
@@ -127,13 +134,16 @@ func (e *Edge) serveAgent(conn net.Conn) {
 	}
 	e.state.HandshakeOK()
 	e.state.SetConnected(fp)
-	e.session.Store(session)
+	if prev := e.session.Swap(session); prev != nil {
+		_ = prev.Close()
+	}
 	e.log.Info("agent.connected", "peer_fp", fp)
 
 	<-session.CloseChan()
-	e.session.CompareAndSwap(session, nil)
-	e.state.SetDisconnected()
-	e.log.Info("agent.disconnected", "peer_fp", fp)
+	if e.session.CompareAndSwap(session, nil) {
+		e.state.SetDisconnected()
+		e.log.Info("agent.disconnected", "peer_fp", fp)
+	}
 }
 
 func (e *Edge) acceptIngress(ctx context.Context, ln net.Listener) {

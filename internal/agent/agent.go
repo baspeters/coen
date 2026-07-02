@@ -135,7 +135,7 @@ func (a *Agent) handleStream(stream net.Conn) {
 	}
 	log := a.log.With("conn_id", p.ConnID, "client_addr", p.ClientAddr)
 	log.Info("stream.accept")
-	svc, err := net.Dial("tcp", a.cfg.Service.Address)
+	svc, err := (&net.Dialer{Timeout: 10 * time.Second}).Dial("tcp", a.cfg.Service.Address)
 	if err != nil {
 		log.Error("service.dial_error", "address", a.cfg.Service.Address, "error", err.Error())
 		return

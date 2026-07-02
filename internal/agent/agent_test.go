@@ -96,6 +96,92 @@ func TestAgentBridgesStreamToService(t *testing.T) {
 	}
 }
 
+func TestAgentRefusesMismatchedEdgeFingerprint(t *testing.T) {
+	ca, err := pki.CreateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	caPath := filepath.Join(dir, "ca.crt")
+	certPath := filepath.Join(dir, "agent.crt")
+	keyPath := filepath.Join(dir, "agent.key")
+	_ = os.WriteFile(caPath, ca.CertPEM(), 0o600)
+	acPEM, akPEM, _ := ca.IssueClient("agent-1")
+	_ = os.WriteFile(certPath, acPEM, 0o600)
+	_ = os.WriteFile(keyPath, akPEM, 0o600)
+
+	edgeCertPEM, edgeKeyPEM, _ := ca.IssueServer("127.0.0.1")
+	edgeCert, _ := tls.X509KeyPair(edgeCertPEM, edgeKeyPEM)
+	pool, _ := pki.CertPoolFromPEM(ca.CertPEM())
+
+	tcpLn, _ := net.Listen("tcp", "127.0.0.1:0")
+	edgeLn := tls.NewListener(tcpLn, tunnel.ServerTLSConfig(pool, edgeCert))
+	defer edgeLn.Close()
+
+	// Fake edge: accept and complete the TLS handshake + yamux session on
+	// every connection, then idle. The agent is expected to reject the
+	// peer itself (fingerprint pin mismatch) before ever using the session.
+	go func() {
+		for {
+			conn, err := edgeLn.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				sess, err := tunnel.ServerSession(c)
+				if err != nil {
+					return
+				}
+				<-sess.CloseChan()
+			}(conn)
+		}
+	}()
+
+	cfg := &config.AgentConfig{
+		Edge: config.EdgeRef{
+			Address:         edgeLn.Addr().String(),
+			CA:              caPath,
+			Cert:            certPath,
+			Key:             keyPath,
+			EdgeFingerprint: "SHA256:nope",
+		},
+		Service:   config.ServiceConfig{Address: "127.0.0.1:1"},
+		Reconnect: config.ReconnectConfig{MinBackoff: config.Duration(5 * time.Millisecond), MaxBackoff: config.Duration(20 * time.Millisecond)},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	state := &obs.State{}
+	a, err := New(cfg, log, state)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = a.Run(ctx) }()
+
+	// Give the agent several reconnect attempts against the fingerprint-mismatched
+	// edge; it must never report connected, and handshake failures must accumulate.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snap := state.Snapshot()
+		if snap.TunnelConnected {
+			t.Fatal("agent reported connected despite edge fingerprint mismatch")
+		}
+		if snap.HandshakeFail >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	snap := state.Snapshot()
+	if snap.TunnelConnected {
+		t.Fatal("agent reported connected despite edge fingerprint mismatch")
+	}
+	if snap.HandshakeFail < 1 {
+		t.Fatalf("expected at least one handshake failure, got %d", snap.HandshakeFail)
+	}
+}
+
 func TestAgentRunReturnsOnCtxCancelWhileConnected(t *testing.T) {
 	ca, err := pki.CreateCA()
 	if err != nil {
