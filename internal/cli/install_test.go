@@ -28,6 +28,9 @@ func TestInstallEdge(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(configDir, "edge.yaml")); err != nil {
 		t.Fatalf("example config not written: %v", err)
 	}
+	if info, err := os.Stat(filepath.Join(configDir, "edge.d")); err != nil || !info.IsDir() {
+		t.Fatalf("edge.d drop-in dir not created: err=%v", err)
+	}
 }
 
 func TestInstallAgent(t *testing.T) {
@@ -49,6 +52,9 @@ func TestInstallAgent(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(configDir, "agent.yaml")); err != nil {
 		t.Fatalf("example config not written: %v", err)
+	}
+	if info, err := os.Stat(filepath.Join(configDir, "agent.d")); err != nil || !info.IsDir() {
+		t.Fatalf("agent.d drop-in dir not created: err=%v", err)
 	}
 }
 

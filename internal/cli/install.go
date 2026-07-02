@@ -55,6 +55,11 @@ func newInstallCmd() *cobra.Command {
 			if err := os.MkdirAll(configDir, 0o750); err != nil {
 				return err
 			}
+			// Create the drop-in route directory (edge.d / agent.d) so operators
+			// can add route fragments without editing the base config.
+			if err := os.MkdirAll(filepath.Join(configDir, role+".d"), 0o750); err != nil {
+				return err
+			}
 			if _, err := os.Stat(configPath); os.IsNotExist(err) {
 				example, err := assets.ReadFile("assets/" + role + ".yaml")
 				if err != nil {

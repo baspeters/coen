@@ -76,6 +76,16 @@ nfpms:
         type: dir
         file_info:
           mode: 0750
+      # Drop-in route directories: operators add per-host/per-agent route
+      # fragments here and coen merges them onto edge.yaml / agent.yaml.
+      - dst: /etc/coen/edge.d
+        type: dir
+        file_info:
+          mode: 0750
+      - dst: /etc/coen/agent.d
+        type: dir
+        file_info:
+          mode: 0750
       # Shipped as plain files under /usr/share/doc: goreleaser's bundled nfpm
       # silently drops entries typed "doc", so install these directly.
       - src: packaging/nginx/coen.conf
