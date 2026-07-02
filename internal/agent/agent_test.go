@@ -683,3 +683,25 @@ func TestHandleStreamNoRouteClosesStream(t *testing.T) {
 	}
 	_ = client.Close()
 }
+
+func TestAgentDrainStreams(t *testing.T) {
+	a := &Agent{
+		cfg:   &config.AgentConfig{Drain: config.Duration(2 * time.Second)},
+		log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		state: &obs.State{},
+	}
+	a.inflight.Add(1) // simulate one in-flight stream
+	done := make(chan struct{})
+	go func() { a.drainStreams(); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("drainStreams returned before in-flight finished")
+	case <-time.After(50 * time.Millisecond):
+	}
+	a.inflight.Done()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("drainStreams did not return after in-flight finished")
+	}
+}

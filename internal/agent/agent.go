@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/baspeters/coen/internal/config"
@@ -24,6 +25,29 @@ type Agent struct {
 	state  *obs.State
 	tlsCfg *tls.Config
 	routes *route.Matcher[string] // host -> local backend service address
+
+	mu       sync.Mutex
+	draining bool
+	inflight sync.WaitGroup
+}
+
+// drainStreams stops accepting new streams, then waits up to cfg.Drain for
+// in-flight streams to finish.
+func (a *Agent) drainStreams() {
+	a.mu.Lock()
+	a.draining = true
+	a.mu.Unlock()
+	timeout := a.cfg.Drain.Duration()
+	if timeout <= 0 {
+		return
+	}
+	done := make(chan struct{})
+	go func() { a.inflight.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		a.log.Warn("drain.timeout", "after", timeout.String())
+	}
 }
 
 func New(cfg *config.AgentConfig, log *slog.Logger, state *obs.State) (*Agent, error) {
@@ -112,13 +136,14 @@ func (a *Agent) connectOnce(ctx context.Context) (established bool, err error) {
 		return true, fmt.Errorf("yamux client: %w", err)
 	}
 	defer session.Close()
-	// Close the session when the context is cancelled so AcceptStream unblocks
-	// and Run can return promptly on shutdown.
+	// On cancellation, drain in-flight streams (bounded) then close the session
+	// so AcceptStream unblocks and Run can return promptly on shutdown.
 	stop := make(chan struct{})
 	defer close(stop)
 	go func() {
 		select {
 		case <-ctx.Done():
+			a.drainStreams()
 			_ = session.Close()
 		case <-stop:
 		}
@@ -128,7 +153,18 @@ func (a *Agent) connectOnce(ctx context.Context) (established bool, err error) {
 		if err != nil {
 			return true, fmt.Errorf("accept stream: %w", err)
 		}
-		go a.handleStream(stream)
+		a.mu.Lock()
+		if a.draining {
+			a.mu.Unlock()
+			_ = stream.Close()
+			continue
+		}
+		a.inflight.Add(1)
+		a.mu.Unlock()
+		go func() {
+			defer a.inflight.Done()
+			a.handleStream(stream)
+		}()
 	}
 }
 

@@ -811,3 +811,55 @@ func TestReadHeaderTimeout(t *testing.T) {
 	}
 	_ = client.Close()
 }
+
+func TestEdgeDrainWaitsForInFlight(t *testing.T) {
+	srv, cli := newServerSession(t)
+	defer cli.Close()
+	e := &Edge{
+		cfg:    &config.EdgeConfig{Drain: config.Duration(2 * time.Second)},
+		log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		state:  &obs.State{},
+		reg:    newRegistry(),
+		routes: route.Build([]route.Entry[*routeState]{{Pattern: "*", Value: &routeState{fingerprint: "FP"}}}),
+	}
+	e.reg.set("FP", srv)
+
+	// Agent side holds the stream open briefly, then echoes.
+	started := make(chan struct{})
+	go func() {
+		st, err := cli.AcceptStream()
+		if err != nil {
+			return
+		}
+		_, _ = tunnel.ReadPreamble(st)
+		close(started)
+		time.Sleep(200 * time.Millisecond)
+		_, _ = st.Write([]byte("LATE"))
+		_ = st.Close()
+	}()
+
+	client, edgeConn := net.Pipe()
+	e.drainWG.Add(1)
+	go func() { defer e.drainWG.Done(); e.handleIngress(edgeConn) }()
+	go func() { _, _ = client.Write([]byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n")) }()
+	<-started
+
+	// Drain must block until the in-flight handler completes.
+	done := make(chan struct{})
+	go func() { e.drain(); close(done) }()
+	select {
+	case <-done:
+		t.Fatal("drain returned before in-flight stream finished")
+	case <-time.After(50 * time.Millisecond):
+	}
+	// Let the client read the late bytes so the handler finishes.
+	buf := make([]byte, 8)
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _ = client.Read(buf)
+	_ = client.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("drain did not return after in-flight stream finished")
+	}
+}

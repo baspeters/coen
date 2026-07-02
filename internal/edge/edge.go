@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/baspeters/coen/internal/config"
@@ -33,6 +34,7 @@ type Edge struct {
 	reg     *registry
 	routes  *route.Matcher[*routeState]
 	sem     *semaphore // global ingress connection cap
+	drainWG sync.WaitGroup
 }
 
 func New(cfg *config.EdgeConfig, log *slog.Logger, state *obs.State) (*Edge, error) {
@@ -95,9 +97,25 @@ func (e *Edge) Serve(ctx context.Context, tunLn, ingressLn net.Listener) error {
 		_ = ingressLn.Close()
 	}()
 	go e.acceptTunnel(ctx, tunLn)
-	e.acceptIngress(ctx, ingressLn)
+	e.acceptIngress(ctx, ingressLn) // returns once ingressLn is closed
+	e.drain()                       // no new handlers can start now
 	e.reg.closeAll()
 	return nil
+}
+
+// drain waits up to cfg.Drain for in-flight ingress handlers to finish.
+func (e *Edge) drain() {
+	timeout := e.cfg.Drain.Duration()
+	if timeout <= 0 {
+		return
+	}
+	done := make(chan struct{})
+	go func() { e.drainWG.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		e.log.Warn("drain.timeout", "after", timeout.String())
+	}
 }
 
 func (e *Edge) acceptTunnel(ctx context.Context, ln net.Listener) {
@@ -160,7 +178,11 @@ func (e *Edge) acceptIngress(ctx context.Context, ln net.Listener) {
 		if err != nil {
 			return
 		}
-		go e.handleIngress(conn)
+		e.drainWG.Add(1)
+		go func() {
+			defer e.drainWG.Done()
+			e.handleIngress(conn)
+		}()
 	}
 }
 
