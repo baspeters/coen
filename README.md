@@ -458,10 +458,13 @@ Contributions are welcome, whether it is a bug fix, a roadmap item, docs, or tes
 4. Keep it green and tidy before opening a pull request:
 
    ```bash
-   gofmt -l .          # should print nothing
-   go vet ./...
-   go test -race ./... # the whole suite passes under the race detector
+   golangci-lint run ./...   # errcheck, staticcheck, govet, ineffassign, unused, gofmt
+   go test -race ./...       # the whole suite passes under the race detector
+   govulncheck ./...         # scan for known vulnerabilities
    ```
+
+   CI runs the same checks (lint, a Go 1.25 and 1.26 test matrix under `-race`,
+   and `govulncheck`) on every push and pull request.
 
 5. Open a pull request that explains what changed and why. Keep it focused, and reference the
    issue it addresses. Conventional-commit-style messages (`feat:`, `fix:`, `docs:`) are

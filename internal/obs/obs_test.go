@@ -40,7 +40,8 @@ func TestNewLoggerEmitsAndLevelVarControls(t *testing.T) {
 }
 
 func TestNewIDUnique(t *testing.T) {
-	if NewID() == NewID() {
+	a, b := NewID(), NewID()
+	if a == b {
 		t.Fatal("IDs should be unique")
 	}
 }

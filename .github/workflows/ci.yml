@@ -1,16 +1,69 @@
 name: CI
+
 on:
   push:
     branches: [main]
   pull_request:
+
+# Least privilege: the workflow only needs to read the repo.
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build-test:
+  lint:
+    name: Lint (golangci-lint, gofmt, go.mod tidy)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
+      - name: golangci-lint
+        # Pinned to the version validated locally; also checks gofmt formatting
+        # and go vet via its bundled analyzers.
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+            | sh -s -- -b "$(go env GOPATH)/bin" v2.12.2
+          "$(go env GOPATH)/bin/golangci-lint" run ./...
+      - name: go.mod / go.sum are tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+  test:
+    name: Test (Go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.25', '1.26']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
       - run: go build ./...
       - run: go vet ./...
-      - run: go test ./...
+      - name: Test (race detector + shuffled order)
+        run: go test -race -shuffle=on -count=1 ./...
+
+  govulncheck:
+    name: Vulnerability scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: govulncheck
+        # Flags known vulnerabilities that the code actually calls. If an
+        # upstream (e.g. stdlib) advisory lands before a Go patch is available,
+        # switch this step to `continue-on-error: true` until the patch ships.
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./...

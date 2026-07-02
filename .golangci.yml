@@ -1,0 +1,14 @@
+version: "2"
+
+linters:
+  # "standard" enables errcheck, govet, ineffassign, staticcheck, and unused.
+  default: standard
+  exclusions:
+    presets:
+      # Ignore the well-known deliberately-unchecked calls (Close, Fprint*, etc.).
+      - std-error-handling
+      - common-false-positives
+
+formatters:
+  enable:
+    - gofmt
