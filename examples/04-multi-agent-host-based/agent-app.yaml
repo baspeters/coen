@@ -1,0 +1,10 @@
+# Agent A — owns app.example.com. Its client cert's fingerprint must match
+# edge.d/team-a.yaml's agent_fingerprint.
+edge:
+  address: edge.example.com:2636
+  ca:   /etc/coen/pki/ca.crt
+  cert: /etc/coen/pki/agent-a.crt
+  key:  /etc/coen/pki/agent-a.key
+routes:
+  - host: app.example.com
+    service: 127.0.0.1:8080

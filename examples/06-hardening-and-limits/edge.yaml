@@ -1,0 +1,22 @@
+ingress:
+  mode: standalone
+  listen: ":443"
+  tls:
+    cert: /etc/coen/certs/public.crt
+    key:  /etc/coen/certs/public.key
+  max_connections: 1024       # global cap on concurrent ingress conns; 0 = unlimited
+  read_header_timeout: 10s    # bound on reading the request head (always on; default 10s)
+  idle_timeout: 120s          # close a stream idle for 120s; 0 = disabled (see note)
+tunnel:
+  listen: ":2636"
+  ca:   /etc/coen/pki/ca.crt
+  cert: /etc/coen/pki/edge.crt
+  key:  /etc/coen/pki/edge.key
+routes:
+  - host: app.example.com
+    agent_fingerprint: "REPLACE_WITH_AGENT_FINGERPRINT"
+    max_connections: 256      # per-route cap, protecting this backend
+  - host: api.example.com
+    agent_fingerprint: "REPLACE_WITH_AGENT_FINGERPRINT"
+    max_connections: 64
+drain_timeout: 30s            # on shutdown, finish in-flight streams for up to 30s

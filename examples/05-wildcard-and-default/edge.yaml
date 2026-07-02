@@ -1,0 +1,19 @@
+ingress:
+  mode: standalone
+  listen: ":443"
+  tls:
+    cert: /etc/coen/certs/public.crt   # wildcard cert for *.example.com
+    key:  /etc/coen/certs/public.key
+tunnel:
+  listen: ":2636"
+  ca:   /etc/coen/pki/ca.crt
+  cert: /etc/coen/pki/edge.crt
+  key:  /etc/coen/pki/edge.key
+routes:
+  # precedence: exact > wildcard > default. All owned by one agent here.
+  - host: app.example.com          # exact wins for this host
+    agent_fingerprint: "REPLACE_WITH_AGENT_FINGERPRINT"
+  - host: "*.example.com"          # any other *.example.com subdomain
+    agent_fingerprint: "REPLACE_WITH_AGENT_FINGERPRINT"
+  - host: "*"                      # catch-all for everything else
+    agent_fingerprint: "REPLACE_WITH_AGENT_FINGERPRINT"

@@ -1,0 +1,10 @@
+ingress:
+  mode: proxied
+  listen: "127.0.0.1:8000"
+tunnel:
+  listen: ":2636"
+  ca:   /etc/coen/pki/ca.crt
+  cert: /etc/coen/pki/edge.crt
+  key:  /etc/coen/pki/edge.key
+# No inline routes: each agent's routes live in a drop-in under edge.d/.
+# Drop a file per owner; coen merges them (sorted by filename) at load.

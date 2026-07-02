@@ -1,0 +1,12 @@
+edge:
+  address: edge.example.com:2636
+  ca:   /etc/coen/pki/ca.crt
+  cert: /etc/coen/pki/agent.crt
+  key:  /etc/coen/pki/agent.key
+routes:
+  - host: app.example.com          # dedicated backend for the exact host
+    service: 127.0.0.1:8080
+  - host: "*.example.com"          # everything else on the domain
+    service: 127.0.0.1:8090
+  - host: "*"                      # catch-all
+    service: 127.0.0.1:8099

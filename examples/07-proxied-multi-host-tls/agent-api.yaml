@@ -1,0 +1,8 @@
+edge:
+  address: edge.example.com:2636
+  ca:   /etc/coen/pki/ca.crt
+  cert: /etc/coen/pki/agent-b.crt
+  key:  /etc/coen/pki/agent-b.key
+routes:
+  - host: api.example.com
+    service: 127.0.0.1:9090

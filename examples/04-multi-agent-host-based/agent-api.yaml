@@ -1,0 +1,10 @@
+# Agent B — owns api.example.com, running on a different private host. Its client
+# cert's fingerprint must match edge.d/team-b.yaml's agent_fingerprint.
+edge:
+  address: edge.example.com:2636
+  ca:   /etc/coen/pki/ca.crt
+  cert: /etc/coen/pki/agent-b.crt
+  key:  /etc/coen/pki/agent-b.key
+routes:
+  - host: api.example.com
+    service: 127.0.0.1:9090

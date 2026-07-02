@@ -1,0 +1,9 @@
+ingress:
+  mode: proxied             # nginx terminates per-host TLS; edge sees plain HTTP
+  listen: "127.0.0.1:8000"
+tunnel:
+  listen: ":2636"
+  ca:   /etc/coen/pki/ca.crt
+  cert: /etc/coen/pki/edge.crt
+  key:  /etc/coen/pki/edge.key
+# Routes live in edge.d/ (one file per host/agent).

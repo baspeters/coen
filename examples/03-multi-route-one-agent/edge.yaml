@@ -1,0 +1,17 @@
+ingress:
+  mode: standalone
+  listen: ":443"
+  tls:
+    cert: /etc/coen/certs/public.crt   # a SAN cert covering both hostnames
+    key:  /etc/coen/certs/public.key
+tunnel:
+  listen: ":2636"
+  ca:   /etc/coen/pki/ca.crt
+  cert: /etc/coen/pki/edge.crt
+  key:  /etc/coen/pki/edge.key
+routes:
+  # both hosts are owned by the same agent (same fingerprint).
+  - host: app.example.com
+    agent_fingerprint: "REPLACE_WITH_AGENT_FINGERPRINT"
+  - host: api.example.com
+    agent_fingerprint: "REPLACE_WITH_AGENT_FINGERPRINT"

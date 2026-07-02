@@ -1,0 +1,14 @@
+ingress:
+  mode: standalone          # the edge terminates public TLS itself
+  listen: ":443"
+  tls:
+    cert: /etc/coen/certs/public.crt
+    key:  /etc/coen/certs/public.key
+tunnel:
+  listen: ":2636"
+  ca:   /etc/coen/pki/ca.crt
+  cert: /etc/coen/pki/edge.crt
+  key:  /etc/coen/pki/edge.key
+routes:
+  - host: app.example.com
+    agent_fingerprint: "REPLACE_WITH_AGENT_FINGERPRINT"

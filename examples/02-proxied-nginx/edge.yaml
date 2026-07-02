@@ -1,0 +1,11 @@
+ingress:
+  mode: proxied             # nginx terminates TLS; the edge speaks plain HTTP
+  listen: "127.0.0.1:8000"  # bound to loopback; only nginx reaches it
+tunnel:
+  listen: ":2636"
+  ca:   /etc/coen/pki/ca.crt
+  cert: /etc/coen/pki/edge.crt
+  key:  /etc/coen/pki/edge.key
+routes:
+  - host: app.example.com
+    agent_fingerprint: "REPLACE_WITH_AGENT_FINGERPRINT"
