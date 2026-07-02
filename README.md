@@ -10,10 +10,10 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Go 1.25+](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)
 
-Coen is a small, self-hosted tunnel. It publishes a private web service to the internet over
-a single, always-on, mutually authenticated connection. It covers the same ground as
-Cloudflare Tunnel or ngrok, except you run both ends and nothing sits between your traffic
-and your two machines.
+Coen is a small, self-hosted tunnel. It publishes one or more private web services to the
+internet over always-on, mutually authenticated connections (one per agent). It covers the
+same ground as Cloudflare Tunnel or ngrok, except you run both ends and nothing sits between
+your traffic and your machines.
 
 > Status: the tunnel core (mTLS transport, HTTP and WebSocket forwarding, reconnect,
 > diagnostics) plus multi-agent host-based routing, public-listener limits (connection
@@ -68,10 +68,18 @@ file, and no third party in the data path.
 - Mutual authentication. The tunnel is TLS 1.3 with client-certificate auth and an Ed25519
   CA. You add or remove an agent by issuing or revoking a certificate; there is no shared
   password to leak.
-- HTTPS and WebSocket. The edge forwards raw byte streams, so `Upgrade` handshakes and
-  long-lived connections pass through without special handling.
+- Host-based routing across many agents. One edge can front many hostnames and many agents.
+  Each hostname is owned by exactly one agent, matched by its client-certificate fingerprint.
+  Routes live inline in the config or in `.d` drop-in files.
+- HTTPS and WebSocket. The edge reads each request's `Host` header to pick a route, then pipes
+  the connection through unchanged, so `Upgrade` handshakes and long-lived sockets work.
 - Two ingress modes. The edge can terminate TLS itself with your PEM certificate, or run
   behind an existing nginx vhost as a plain-HTTP upstream.
+- Public-listener hardening. Global and per-route connection caps, a request-header read
+  timeout, an optional idle deadline, and lazy backend dial (an agent is only reached once a
+  complete request head has arrived).
+- Graceful shutdown. On SIGINT or SIGTERM the edge and agent stop accepting new work and drain
+  in-flight streams up to a configurable timeout before exiting.
 - Automatic reconnect. The agent retries with exponential backoff and jitter; yamux
   keepalives notice dead peers behind NAT.
 - Diagnostics that actually help. Named connectivity events in the logs, a `conn_id` that ties
@@ -109,14 +117,18 @@ which is what lets Coen work from behind NAT without any inbound ports.
 ## Key concepts
 
 - Edge: the public `coen edge` process. It terminates (or, behind nginx, receives) public
-  traffic and multiplexes it down the tunnel.
+  traffic, reads each request's `Host` header, and routes it to the agent that owns that
+  hostname.
 - Agent: the private `coen agent` process. It dials the edge, authenticates, and bridges each
-  stream to your local service.
-- Tunnel: one persistent mTLS connection on port `2636`, which is `COEN` on a phone keypad. It
-  carries many multiplexed [yamux](https://github.com/hashicorp/yamux) streams.
+  stream to the local service matched by the request's `Host`.
+- Route: a `host` pattern paired with a target. On the edge the target is the owning agent (by
+  client-certificate fingerprint); on the agent it is a local backend address. Matching is
+  exact, then wildcard (`*.suffix`), then a default (`*`).
+- Tunnel: each agent keeps one persistent mTLS connection to port `2636` (`COEN` on a phone
+  keypad), carrying many multiplexed [yamux](https://github.com/hashicorp/yamux) streams.
 - Stream and preamble: every public connection becomes one stream, prefixed with a short
-  preamble that carries a `conn_id` and the original client address so a request can be traced
-  from end to end.
+  preamble that carries a `conn_id`, the original client address, and the request `Host`, so a
+  request can be routed by the agent and traced end to end.
 
 ### Request data flow
 
@@ -129,8 +141,9 @@ sequenceDiagram
     participant B as Backend app
     Note over E,A: Persistent mTLS + yamux tunnel on :2636
     C->>E: HTTPS request, TLS terminated at edge or nginx
-    E->>A: Open a yamux stream, preamble carries conn_id and client_addr
-    A->>B: Dial 127.0.0.1:8080
+    E->>E: Read the Host header, match a route, pick the owning agent
+    E->>A: Open a yamux stream; preamble carries conn_id, client_addr, Host
+    A->>B: Dial the backend that the agent maps this Host to
     C->>B: request bytes piped through the tunnel
     B->>C: response bytes piped back
 ```
@@ -191,7 +204,8 @@ coen version
 Every release also ships native packages for amd64 and arm64. They install the
 binary to `/usr/bin/coen`, add systemd units for both roles under
 `/usr/lib/systemd/system`, create a dedicated `coen` service user, and lay down
-example configs in `/etc/coen` (preserved across upgrades). Download the file
+example configs plus the `edge.d/` and `agent.d/` route drop-in directories in
+`/etc/coen` (configs preserved across upgrades). Download the file
 for your distribution from the
 [latest release](https://github.com/baspeters/coen/releases/latest):
 
@@ -343,7 +357,7 @@ mTLS tunnel stays end to end, since nginx never sees the tunnel's certificates.
 
 ## Examples
 
-The [`examples/`](examples/) directory has worked configurations for every setup variant and
+The [`examples/`](examples/) directory has an example configuration for every setup variant and
 config option, each with its own README:
 
 | Example | Shows |
@@ -393,15 +407,46 @@ coen install edge  --unit-dir /etc/systemd/system --config-dir /etc/coen --bin /
 ```
 
 Sending `SIGHUP`, or running `systemctl reload`, re-reads a running daemon's config and
-re-applies its log level without a restart.
+hot-applies the `log.level` without a restart. Other changes (routes, listeners, caps,
+timeouts, fingerprints) are read at startup and take effect only when the process restarts.
 
 ## Configuration reference
 
-Config is YAML, one file per role. Defaults are `/etc/coen/edge.yaml` and
-`/etc/coen/agent.yaml`, overridable with `--config`. Files are validated at startup with clear
-error messages.
+### The config system
 
-`edge.yaml`:
+- **One file per role.** The edge reads `edge.yaml`, the agent reads `agent.yaml`. The
+  defaults are `/etc/coen/edge.yaml` and `/etc/coen/agent.yaml`; override either with
+  `--config <path>`.
+- **Format.** YAML (`gopkg.in/yaml.v3`). Unknown keys in the base file are ignored; unknown
+  keys in a drop-in file are rejected (see below).
+- **Durations** are Go duration strings: `500ms`, `10s`, `2m`, `1h`. Every field whose name
+  ends in `_timeout` or `_backoff` takes one.
+- **Validation at startup.** The daemon refuses to start on an invalid config and prints the
+  offending field. It checks the ingress mode, the required paths and addresses, that there is
+  at least one route, that every `host` pattern is well formed, and that no host is defined
+  twice. `coen doctor` goes further at runtime (file presence, certificate expiry, DNS,
+  reachability, a live mTLS handshake, clock skew, and each route's backend).
+- **Reload.** `SIGHUP` (or `systemctl reload`) re-reads the file and hot-applies `log.level`
+  only. Routes, listeners, caps, timeouts, and fingerprints are read at startup and change
+  only on restart.
+- **Drop-in route files (`.d`).** Routes may live inline under `routes:` and/or in a
+  `<name>.d/` directory next to the config file: `edge.yaml` uses `edge.d/`, `agent.yaml` uses
+  `agent.d/`. Each drop-in is a routes-only fragment (a top-level `routes:` list and nothing
+  else; any other key is an error). Files are read in sorted filename order and their routes
+  appended to the inline `routes`. A host defined twice, whether across two drop-ins or between
+  a drop-in and the base file, is a load error that names both sources. The directory is
+  optional; when absent, only the inline `routes` are used. Drop-ins suit one file per
+  agent or team, and config-managed deployments.
+
+  ```
+  /etc/coen/
+    edge.yaml          # base config, may carry inline routes
+    edge.d/            # optional; merged in sorted order
+      team-a.yaml      #   routes: [ { host: app.example.com, agent_fingerprint: "..." } ]
+      team-b.yaml      #   routes: [ { host: api.example.com, agent_fingerprint: "..." } ]
+  ```
+
+### Edge configuration (`edge.yaml`)
 
 ```yaml
 ingress:
@@ -430,13 +475,27 @@ admin:
   socket: /run/coen/edge.sock
 ```
 
-Routes may also be split into drop-in files under a `<name>.d/` directory next to
-the config file (`edge.yaml` uses `edge.d/`). Each drop-in is a routes-only
-fragment (`routes: [ ... ]`), merged in sorted filename order; a duplicate host
-across files is a load error. The fingerprint allowlist is derived from the
-routes, so an agent whose fingerprint owns no route is refused.
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `ingress.mode` | string | required | `standalone` (the edge terminates public TLS) or `proxied` (nginx terminates TLS and the edge receives plain HTTP). |
+| `ingress.listen` | string | required | Public ingress address, `host:port`. `:443` in standalone, `127.0.0.1:8000` behind nginx. |
+| `ingress.tls.cert`, `ingress.tls.key` | path | required in `standalone` | PEM certificate and key for public TLS. Unused in `proxied` mode. |
+| `ingress.max_connections` | int | `0` | Global cap on concurrent ingress connections; over it the edge returns `503`. `0` means unlimited. |
+| `ingress.read_header_timeout` | duration | `10s` | Deadline for reading a request head (slow-loris protection). `0` disables it. |
+| `ingress.idle_timeout` | duration | `0` | Rolling idle deadline while streaming: a connection with no bytes in either direction for this long is closed. `0` disables it. See the WebSocket note below. |
+| `tunnel.listen` | string | required | Address of the mTLS tunnel server the agents dial, e.g. `:2636`. |
+| `tunnel.ca` | path | required | CA bundle that an agent's client certificate must chain to. |
+| `tunnel.cert`, `tunnel.key` | path | required | The edge's server certificate and key for the tunnel. |
+| `routes` | list | at least one | Host ownership; see [Host routing](#host-routing-and-matching). May be split into `edge.d/`. |
+| `routes[].host` | string | required | Match pattern: an exact host, a `*.suffix` wildcard, or `*` (default). |
+| `routes[].agent_fingerprint` | string | required | `SHA256:...` fingerprint of the agent that owns this host; `coen cert agent` prints it. The set of these values is the connection allowlist. |
+| `routes[].max_connections` | int | `0` | Per-route cap on concurrent connections; over it the edge returns `503`. `0` means unlimited. |
+| `drain_timeout` | duration | `15s` | On shutdown, finish in-flight streams for up to this long before force-closing. `0` closes immediately. |
+| `log.level` | string | `info` | `trace`, `debug`, `info`, `warn`, or `error`. |
+| `log.format` | string | `text` | `text` or `json`. |
+| `admin.socket` | path | (unset) | Unix socket for `coen status`. When unset, the status socket is disabled. |
 
-`agent.yaml`:
+### Agent configuration (`agent.yaml`)
 
 ```yaml
 edge:
@@ -459,10 +518,70 @@ admin:
   socket: /run/coen/agent.sock
 ```
 
-Host matching precedence is **exact > wildcard (`*.suffix`) > default (`*`)**. A
-request whose `Host` matches no route gets a `404`; a matched route whose agent
-is offline gets a `502`; a connection over a cap gets a `503`. See
-[`examples/`](examples/) for worked configurations of every variant.
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `edge.address` | string | required | `host:port` of the edge tunnel. The host part must match a name in the edge's server certificate. |
+| `edge.ca` | path | required | CA bundle the edge's server certificate must chain to. |
+| `edge.cert`, `edge.key` | path | required | The agent's client certificate and key. |
+| `edge.edge_fingerprint` | string | (unset) | Optional pin. When set, the agent refuses an edge whose server-certificate fingerprint differs. |
+| `routes` | list | at least one | Host to local backend; see [Host routing](#host-routing-and-matching). May be split into `agent.d/`. |
+| `routes[].host` | string | required | Same pattern grammar as the edge: exact, `*.suffix`, or `*`. |
+| `routes[].service` | string | required | Local backend address (`host:port`) the agent dials for this host. |
+| `reconnect.min_backoff` | duration | `1s` | Initial reconnect backoff. |
+| `reconnect.max_backoff` | duration | `30s` | Maximum reconnect backoff (exponential, with jitter). |
+| `drain_timeout` | duration | `15s` | On shutdown, finish in-flight streams for up to this long. `0` closes immediately. |
+| `log.level` | string | `info` | `trace`, `debug`, `info`, `warn`, or `error`. |
+| `log.format` | string | `text` | `text` or `json`. |
+| `admin.socket` | path | (unset) | Unix socket for `coen status`. When unset, the status socket is disabled. |
+
+Host patterns appear on both ends: the edge authorizes which agent owns a host, and the agent
+maps the same host to a backend.
+
+### Host routing and matching
+
+The edge reads the HTTP `Host` header of each ingress connection (both modes see cleartext
+HTTP/1.x), lowercases it, and strips any port before matching it against the route table.
+Precedence is:
+
+1. **Exact** host (`app.example.com`).
+2. **Wildcard** `*.suffix` (`*.example.com` matches `a.example.com` and `a.b.example.com`); the
+   most specific match, that is the longest suffix, wins.
+3. **Default** `*`, if present, matches anything else.
+
+The matched edge route names the owning agent's fingerprint. The edge finds that agent's live
+session, opens a stream, and forwards the request with the `Host` in the preamble; the agent
+matches the same `Host` against its own `routes` and dials the backend. Both ends must agree on
+the host patterns.
+
+The edge answers with a plain HTTP status when it cannot forward:
+
+| Code | Meaning |
+| --- | --- |
+| `400` | The request head was malformed, missing a `Host`, oversized, or not sent before `read_header_timeout`. |
+| `404` | No route matched the `Host`. |
+| `502` | A route matched but its agent is not connected, or a tunnel stream could not be opened. |
+| `503` | A global or per-route connection cap was reached. |
+
+### Listener hardening (edge)
+
+- `ingress.max_connections` and `routes[].max_connections` cap concurrent connections globally
+  and per route; over a cap the edge returns `503` without touching an agent.
+- `ingress.read_header_timeout` (default `10s`, always on unless `0`) bounds how long a client
+  may take to send its request head.
+- `ingress.idle_timeout` (default off) closes a streaming connection after that long with no
+  bytes in either direction. It is off by default because it would drop an idle but healthy
+  WebSocket; set it comfortably above your keepalive interval, or leave it `0`.
+- **Lazy backend dial** is inherent, not a knob: the edge opens a tunnel stream (and so the
+  agent dials the backend) only after a complete, valid request head has arrived. Connections
+  that connect and idle, or send garbage, never reach an agent or backend.
+
+### Graceful draining
+
+On `SIGINT` or `SIGTERM`, the edge stops accepting new ingress connections and the agent stops
+accepting new streams; both then wait up to `drain_timeout` for in-flight streams to finish
+before force-closing and exiting. A `drain_timeout` of `0` closes everything immediately.
+
+See [`examples/`](examples/) for an example configuration of each variant.
 
 ## Security model
 
@@ -478,6 +597,12 @@ For defence in depth beyond CA trust, the agent can pin the edge's fingerprint
 those fingerprints is the connection allowlist. An agent whose fingerprint owns
 no route is refused, and an agent cannot serve a hostname it was not granted.
 
+A fingerprint has at most one live session. A second connection presenting the
+same certificate, whether a health probe such as `coen doctor --role agent` or a
+duplicate certificate on two hosts, is refused without disturbing the serving
+agent; a genuine reconnect still works, because the previous session is already
+gone by the time the agent redials.
+
 Because the edge routes on the HTTP `Host` header, it parses the request head of
 each ingress connection (in both standalone and proxied modes it sees cleartext
 HTTP/1.x). This means the edge serves HTTP and WebSocket traffic, not arbitrary
@@ -488,11 +613,14 @@ The systemd units ship with least privilege in mind. They run as a non-root `coe
 `NoNewPrivileges`, `ProtectSystem=strict`, and a scoped `ReadWritePaths`. A standalone edge
 that binds `:443` gets exactly `CAP_NET_BIND_SERVICE`, not full root.
 
-Known limits for this MVP: the tunnel port enforces a TLS-handshake deadline, but ingress
-idle-deadlines, connection caps, and bounded in-flight draining on shutdown are on the
-[roadmap](#roadmap). In a proxied deployment, nginx fronts the ingress and handles slow-client
-protection. Treat internet-exposed use as beta, and where you can, firewall the tunnel port to
-known sources.
+The public listener has several protections you configure under `ingress` (see the
+[configuration reference](#listener-hardening-edge)): a TLS-handshake deadline on the tunnel
+port, a request-header read deadline, an optional idle deadline, global and per-route
+connection caps, and lazy backend dial so a connection reaches an agent only after sending a
+complete request head. On shutdown, in-flight streams are drained up to `drain_timeout`. In a
+proxied deployment nginx also fronts the ingress and adds its own slow-client protection.
+Treat internet-exposed use as beta, and where you can, firewall the tunnel port to known
+sources.
 
 ## Observability and diagnostics
 
@@ -508,13 +636,17 @@ Because every request carries a `conn_id` in its stream preamble, the same id sh
 the edge and agent logs. Running `grep <conn_id>` on either host reconstructs one request's
 whole lifecycle.
 
-`coen status` returns a live snapshot over a local Unix socket: whether the tunnel is up and
-since when, active and total streams, bytes in and out, reconnect count, last error, and the
-peer fingerprint. Add `--json` for scripts.
+`coen status` returns a live snapshot over a local Unix socket: active and total streams,
+bytes in and out, reconnect count, last error, and handshake counts. On the edge it lists the
+connected agents with their fingerprints and connect times; on the agent it shows whether the
+tunnel is up and since when. Add `--json` for scripts. If `admin.socket` is unset, the status
+socket is disabled.
 
 `coen doctor` runs the role-aware preflight described above and exits non-zero if anything
-fails, so it fits into deploy scripts. The log level can be changed on a running daemon with
-`systemctl reload` or `SIGHUP`, without dropping the tunnel.
+fails, so it fits into deploy scripts. Its agent-side mTLS check is safe to run against a live
+agent: the edge keeps the serving session and refuses the probe. Only the `log.level` can be
+changed on a running daemon (with `systemctl reload` or `SIGHUP`); other changes need a
+restart.
 
 ## Running as a systemd service
 
@@ -587,16 +719,19 @@ disclosure.
 cmd/coen/            thin main() entrypoint
 internal/
   cli/               cobra commands (edge, agent, cert, doctor, status, install, version)
-  edge/              public server: ingress listeners, tunnel server, stream router
-  agent/             private client: dial and reconnect, stream-to-service bridge
+  edge/              public server: ingress listeners, tunnel server, session registry,
+                     host router, connection caps, graceful draining
+  agent/             private client: dial and reconnect, per-host stream-to-backend bridge
+  route/             host-pattern matcher (exact > wildcard > default), shared by edge/agent
   tunnel/            shared mTLS config, yamux sessions, stream preamble
-  proxy/             bidirectional byte-copy plumbing
+  proxy/             byte-copy plumbing, idle-deadline and prefix conn wrappers
   pki/               Ed25519 CA, certificate issuance, fingerprints
-  config/            YAML load and validation
+  config/            YAML load, .d drop-in merge, and validation
   obs/               slog logging, correlation IDs, live counters
   admin/             local unix-socket status and control server
   doctor/            preflight diagnostic checks
-  e2e/               end-to-end tests (HTTP, WebSocket, correlation)
+  e2e/               end-to-end tests (HTTP, WebSocket, correlation, host routing)
+examples/            example configs for each setup variant and config option
 packaging/nginx/     example proxied-mode vhost snippet
 ```
 
@@ -605,11 +740,19 @@ packaging/nginx/     example proxied-mode vhost snippet
 Do I need to open inbound ports on the private machine? No. The agent only makes an outbound
 connection to the edge.
 
-Does it support WebSockets? Yes. The edge forwards raw byte streams, so `Upgrade` handshakes
-and long-lived sockets pass through.
+Does it support WebSockets? Yes. The edge reads a request's `Host` header to route it, then
+pipes the connection through unchanged, so `Upgrade` handshakes and long-lived sockets work.
 
-Can several agents connect to one edge? The MVP tracks a single active agent per edge.
-Multi-agent support and load balancing are on the roadmap.
+Can several agents connect to one edge? Yes. One edge fronts many agents, each owning a
+distinct set of hostnames (matched by client-certificate fingerprint). What is not yet
+supported is load balancing, that is two or more agents serving the same hostname; that is on
+the roadmap.
+
+Can one agent serve several hostnames? Yes. Give the agent a route per host, each mapping to a
+local backend, and grant it those hosts on the edge.
+
+Does it tunnel arbitrary TCP? No. The edge routes on the HTTP `Host` header, so it serves
+HTTP/1.x and WebSocket traffic. Raw non-HTTP TCP and HTTP/2 at the edge are out of scope.
 
 Where do the public TLS certificates come from? You provide them in standalone mode (for
 example, Let's Encrypt), or nginx owns them in proxied mode. The Coen CA is only for the
