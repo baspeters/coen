@@ -67,3 +67,35 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           "$(go env GOPATH)/bin/govulncheck" ./...
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: Test with coverage
+        # -coverpkg=./... credits cross-package coverage from the e2e tests too.
+        run: go test -covermode=atomic -coverpkg=./... -coverprofile=coverage.out ./...
+      - name: Report total coverage
+        run: |
+          go tool cover -func=coverage.out | tail -1
+          {
+            echo "### Test coverage"
+            echo ''
+            echo '```'
+            go tool cover -func=coverage.out | tail -1
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Generate HTML report
+        run: go tool cover -html=coverage.out -o coverage.html
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage.out
+            coverage.html
+          if-no-files-found: error
