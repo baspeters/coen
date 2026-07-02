@@ -1,4 +1,4 @@
-![Coen: a lightweight, secure, self-hosted tunnel](docs/assets/coen-banner.png)
+![Coen: a lightweight, secure, self-hosted tunnel](docs/assets/coen-banner.webp)
 
 # Coen
 
