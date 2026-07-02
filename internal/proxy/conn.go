@@ -22,7 +22,7 @@ func NewIdleConn(c net.Conn, idle time.Duration) *IdleConn {
 
 func (c *IdleConn) bump() {
 	if c.idle > 0 {
-		_ = c.Conn.SetDeadline(time.Now().Add(c.idle))
+		_ = c.SetDeadline(time.Now().Add(c.idle))
 	}
 }
 
