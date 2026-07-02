@@ -63,22 +63,35 @@ func TestCheckAgentPassesMTLSButDetectsDeadService(t *testing.T) {
 		}
 	}()
 
-	// A guaranteed-closed service port.
+	// A guaranteed-closed service port (fails the reach check)...
 	dead, _ := net.Listen("tcp", "127.0.0.1:0")
 	deadAddr := dead.Addr().String()
 	_ = dead.Close()
+	// ...and a live one (passes it), so both per-route branches are covered.
+	live, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer live.Close()
 
 	cfg := &config.AgentConfig{
-		Edge:   config.EdgeRef{Address: edgeLn.Addr().String(), CA: caPath, Cert: certPath, Key: keyPath},
-		Routes: []config.AgentRoute{{Host: "*", Service: deadAddr}},
+		Edge: config.EdgeRef{Address: edgeLn.Addr().String(), CA: caPath, Cert: certPath, Key: keyPath},
+		Routes: []config.AgentRoute{
+			{Host: "down.example.com", Service: deadAddr},
+			{Host: "up.example.com", Service: live.Addr().String()},
+		},
 	}
 	results := CheckAgent(cfg)
 	if mtls, _ := findResult(results, "mtls: handshake"); !mtls.OK {
 		t.Fatalf("mtls should pass: %+v", mtls)
 	}
-	svc, found := findResult(results, "service: reach *")
+	svc, found := findResult(results, "service: reach down.example.com")
 	if !found || svc.OK {
-		t.Fatalf("service check should fail (found=%v): %+v", found, svc)
+		t.Fatalf("dead service check should fail (found=%v): %+v", found, svc)
+	}
+	up, found := findResult(results, "service: reach up.example.com")
+	if !found || !up.OK {
+		t.Fatalf("live service check should pass (found=%v): %+v", found, up)
 	}
 }
 

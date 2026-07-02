@@ -863,3 +863,51 @@ func TestEdgeDrainWaitsForInFlight(t *testing.T) {
 		t.Fatal("drain did not return after in-flight stream finished")
 	}
 }
+
+func TestEdgeDrainTimeoutAndImmediate(t *testing.T) {
+	// timeout branch: an in-flight handler that never finishes; drain returns
+	// after cfg.Drain rather than hanging.
+	e := &Edge{
+		cfg: &config.EdgeConfig{Drain: config.Duration(40 * time.Millisecond)},
+		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	e.drainWG.Add(1)
+	done := make(chan struct{})
+	go func() { e.drain(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("drain did not return after timeout")
+	}
+	e.drainWG.Done()
+
+	// drain_timeout: 0 returns immediately even with work outstanding.
+	e0 := &Edge{cfg: &config.EdgeConfig{Drain: 0}, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	e0.drainWG.Add(1)
+	e0.drain() // must not block
+	e0.drainWG.Done()
+}
+
+func TestHandleIngressBrokenSessionReturns502(t *testing.T) {
+	srv, cli := newServerSession(t)
+	_ = srv.Close() // the registered session is already closed, so OpenStream fails
+	_ = cli.Close()
+	e := &Edge{
+		cfg:    &config.EdgeConfig{},
+		log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		state:  &obs.State{},
+		reg:    newRegistry(),
+		routes: route.Build([]route.Entry[*routeState]{{Pattern: "*", Value: &routeState{fingerprint: "FP"}}}),
+	}
+	e.reg.set("FP", srv)
+	client, edgeConn := net.Pipe()
+	go e.handleIngress(edgeConn)
+	go func() { _, _ = client.Write([]byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n")) }()
+	buf := make([]byte, 64)
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, _ := client.Read(buf)
+	if !strings.Contains(string(buf[:n]), "502") {
+		t.Fatalf("expected 502 when the session cannot open a stream, got %q", buf[:n])
+	}
+	_ = client.Close()
+}

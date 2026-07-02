@@ -528,3 +528,125 @@ routes:
 		t.Errorf("agent drain default = %v, want 15s", c.Drain.Duration())
 	}
 }
+
+func TestLoadAgentDropIns(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "agent.yaml")
+	writeFile(t, base, `
+edge: { address: "e:2636", ca: /a, cert: /b, key: /c }
+routes:
+  - host: app.example.com
+    service: 127.0.0.1:8080
+`)
+	dd := filepath.Join(dir, "agent.d")
+	if err := os.Mkdir(dd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dd, "api.yaml"), `
+routes:
+  - host: api.example.com
+    service: 127.0.0.1:9090
+`)
+	c, err := LoadAgent(base)
+	if err != nil {
+		t.Fatalf("LoadAgent: %v", err)
+	}
+	if len(c.Routes) != 2 {
+		t.Fatalf("routes = %d, want 2", len(c.Routes))
+	}
+}
+
+func TestLoadAgentDuplicateHostAcrossFiles(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "agent.yaml")
+	writeFile(t, base, `
+edge: { address: "e:2636", ca: /a, cert: /b, key: /c }
+routes: [ { host: app.example.com, service: 127.0.0.1:8080 } ]
+`)
+	dd := filepath.Join(dir, "agent.d")
+	if err := os.Mkdir(dd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dd, "dup.yaml"), `
+routes: [ { host: app.example.com, service: 127.0.0.1:9090 } ]
+`)
+	if _, err := LoadAgent(base); err == nil || !strings.Contains(err.Error(), "duplicate host") {
+		t.Fatalf("expected duplicate host error, got %v", err)
+	}
+}
+
+func TestLoadAgentStrictDropInRejectsStrayKey(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "agent.yaml")
+	writeFile(t, base, `
+edge: { address: "e:2636", ca: /a, cert: /b, key: /c }
+routes: [ { host: app.example.com, service: 127.0.0.1:8080 } ]
+`)
+	dd := filepath.Join(dir, "agent.d")
+	if err := os.Mkdir(dd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dd, "bad.yaml"), "edge: { address: x }\n")
+	if _, err := LoadAgent(base); err == nil {
+		t.Fatal("expected strict-decode error for stray key in agent drop-in")
+	}
+}
+
+func TestEdgeConfigValidateRoutes(t *testing.T) {
+	cases := []struct {
+		name string
+		mut  func(*EdgeConfig)
+		want string
+	}{
+		{"no routes", func(c *EdgeConfig) { c.Routes = nil }, "at least one route"},
+		{"missing host", func(c *EdgeConfig) { c.Routes = []EdgeRoute{{AgentFingerprint: "AA"}} }, "host is required"},
+		{"missing fingerprint", func(c *EdgeConfig) { c.Routes = []EdgeRoute{{Host: "a.example.com"}} }, "agent_fingerprint is required"},
+		{"bad pattern", func(c *EdgeConfig) { c.Routes = []EdgeRoute{{Host: "*.*.com", AgentFingerprint: "AA"}} }, "invalid"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validEdgeConfig()
+			tc.mut(&c)
+			err := c.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want error containing %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestAgentConfigValidateRoutes(t *testing.T) {
+	cases := []struct {
+		name string
+		mut  func(*AgentConfig)
+		want string
+	}{
+		{"missing host", func(c *AgentConfig) { c.Routes = []AgentRoute{{Service: "127.0.0.1:8080"}} }, "host is required"},
+		{"bad pattern", func(c *AgentConfig) { c.Routes = []AgentRoute{{Host: "a*b.com", Service: "127.0.0.1:8080"}} }, "invalid"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validAgentConfig()
+			tc.mut(&c)
+			err := c.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want error containing %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestLoadEdgeDropInDirUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "edge.yaml")
+	writeFile(t, base, `
+ingress: { mode: proxied, listen: "127.0.0.1:8000" }
+tunnel: { listen: ":2636", ca: /a, cert: /b, key: /c }
+routes: [ { host: app.example.com, agent_fingerprint: "AA" } ]
+`)
+	// edge.d exists but is a regular file, so ReadDir fails with a non-IsNotExist error.
+	writeFile(t, filepath.Join(dir, "edge.d"), "not a directory\n")
+	if _, err := LoadEdge(base); err == nil || !strings.Contains(err.Error(), "read drop-in dir") {
+		t.Fatalf("expected read drop-in dir error, got %v", err)
+	}
+}

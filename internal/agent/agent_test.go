@@ -705,3 +705,24 @@ func TestAgentDrainStreams(t *testing.T) {
 		t.Fatal("drainStreams did not return after in-flight finished")
 	}
 }
+
+func TestAgentDrainStreamsTimeoutAndImmediate(t *testing.T) {
+	a := &Agent{
+		cfg: &config.AgentConfig{Drain: config.Duration(40 * time.Millisecond)},
+		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	a.inflight.Add(1) // never Done: exercise the timeout branch
+	done := make(chan struct{})
+	go func() { a.drainStreams(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("drainStreams did not return after timeout")
+	}
+	a.inflight.Done()
+
+	a0 := &Agent{cfg: &config.AgentConfig{Drain: 0}, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	a0.inflight.Add(1)
+	a0.drainStreams() // drain_timeout 0: returns immediately
+	a0.inflight.Done()
+}
