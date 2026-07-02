@@ -5,6 +5,7 @@
 [![CI](https://github.com/baspeters/coen/actions/workflows/ci.yml/badge.svg)](https://github.com/baspeters/coen/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/baspeters/coen/actions/workflows/codeql.yml/badge.svg)](https://github.com/baspeters/coen/actions/workflows/codeql.yml)
 [![codecov](https://codecov.io/gh/baspeters/coen/graph/badge.svg)](https://codecov.io/gh/baspeters/coen)
+[![Release](https://img.shields.io/github/v/release/baspeters/coen?sort=semver)](https://github.com/baspeters/coen/releases/latest)
 [![Go Reference](https://pkg.go.dev/badge/github.com/baspeters/coen.svg)](https://pkg.go.dev/github.com/baspeters/coen)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Go 1.25+](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)
@@ -167,16 +168,31 @@ flowchart TB
 
 ## Installation
 
-Coen builds to a single static binary. You need Go 1.25 or newer to build it. The daemons
-target Linux with systemd; the CLI and the `coen cert` tooling run anywhere Go does.
+Coen is a single static binary. The daemons target Linux (systemd); the CLI and the
+`coen cert` tooling run anywhere Go does.
 
-With `go install`:
+### From a release (prebuilt binary)
+
+Download the archive for your OS and architecture from the
+[latest release](https://github.com/baspeters/coen/releases/latest). Assets are named
+`coen_<version>_<os>_<arch>.tar.gz` (linux/darwin, amd64/arm64), with a `checksums.txt`
+alongside for verification. Extract and put `coen` on your PATH:
+
+```bash
+tar -xzf coen_*_linux_amd64.tar.gz coen
+sudo install coen /usr/local/bin/coen
+coen version
+```
+
+### With `go install`
+
+Requires Go 1.25 or newer:
 
 ```bash
 go install github.com/baspeters/coen/cmd/coen@latest
 ```
 
-From source:
+### From source
 
 ```bash
 git clone https://github.com/baspeters/coen
