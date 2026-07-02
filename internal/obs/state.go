@@ -1,6 +1,7 @@
 package obs
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -18,6 +19,32 @@ type State struct {
 	handshakeFail atomic.Int64
 	lastError     atomic.Value // string
 	peerFP        atomic.Value // string
+
+	agentsMu sync.Mutex
+	agents   map[string]time.Time // edge: connected agents by fingerprint
+}
+
+// AgentConnected records a live edge<-agent tunnel keyed by fingerprint.
+func (s *State) AgentConnected(fp string) {
+	s.agentsMu.Lock()
+	defer s.agentsMu.Unlock()
+	if s.agents == nil {
+		s.agents = make(map[string]time.Time)
+	}
+	s.agents[fp] = time.Now()
+}
+
+// AgentDisconnected removes a tunnel.
+func (s *State) AgentDisconnected(fp string) {
+	s.agentsMu.Lock()
+	defer s.agentsMu.Unlock()
+	delete(s.agents, fp)
+}
+
+// AgentInfo describes one connected agent in a Snapshot.
+type AgentInfo struct {
+	Fingerprint    string    `json:"fingerprint"`
+	ConnectedSince time.Time `json:"connected_since"`
 }
 
 func (s *State) SetConnected(fp string) {
@@ -47,8 +74,9 @@ type Snapshot struct {
 	Reconnects      int64     `json:"reconnects"`
 	HandshakeOK     int64     `json:"handshake_ok"`
 	HandshakeFail   int64     `json:"handshake_fail"`
-	LastError       string    `json:"last_error,omitempty"`
-	PeerFingerprint string    `json:"peer_fingerprint,omitempty"`
+	LastError       string      `json:"last_error,omitempty"`
+	PeerFingerprint string      `json:"peer_fingerprint,omitempty"`
+	Agents          []AgentInfo `json:"agents,omitempty"`
 }
 
 func loadStr(v *atomic.Value) string {
@@ -74,5 +102,10 @@ func (s *State) Snapshot() Snapshot {
 	if snap.TunnelConnected {
 		snap.ConnectedSince = time.Unix(0, s.connectedNano.Load())
 	}
+	s.agentsMu.Lock()
+	for fp, since := range s.agents {
+		snap.Agents = append(snap.Agents, AgentInfo{Fingerprint: fp, ConnectedSince: since})
+	}
+	s.agentsMu.Unlock()
 	return snap
 }

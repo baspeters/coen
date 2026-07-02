@@ -187,3 +187,17 @@ func TestSnapshotConnectedSinceOmitZero(t *testing.T) {
 		t.Fatalf("zero time should be omitted, got: %s", string(data3))
 	}
 }
+
+func TestAgentSet(t *testing.T) {
+	var s State
+	s.AgentConnected("AA")
+	s.AgentConnected("BB")
+	snap := s.Snapshot()
+	if len(snap.Agents) != 2 {
+		t.Fatalf("agents = %d, want 2", len(snap.Agents))
+	}
+	s.AgentDisconnected("AA")
+	if got := len(s.Snapshot().Agents); got != 1 {
+		t.Fatalf("agents after disconnect = %d, want 1", got)
+	}
+}
