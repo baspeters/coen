@@ -1,0 +1,13 @@
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 2%      # allow a small dip without failing the check
+    patch:
+      default:
+        informational: true   # report patch coverage, but don't block PRs
+
+comment:
+  layout: "reach, diff, files"
+  require_changes: false

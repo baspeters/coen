@@ -89,6 +89,14 @@ jobs:
             go tool cover -func=coverage.out | tail -1
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.out
+          # Don't fail the pipeline on a Codecov upload hiccup; the profile is
+          # still kept as an artifact below. Flip to true to enforce uploads.
+          fail_ci_if_error: false
       - name: Generate HTML report
         run: go tool cover -html=coverage.out -o coverage.html
       - name: Upload coverage report
