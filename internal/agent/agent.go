@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand"
 	"net"
@@ -168,6 +169,13 @@ func (a *Agent) connectOnce(ctx context.Context) (established bool, err error) {
 	}
 }
 
+// writeGatewayError sends a minimal HTTP/1.1 502 into the stream. The edge is
+// already piping the stream back to the client, so this reaches the client as a
+// real response instead of an empty reply when the agent cannot reach a backend.
+func writeGatewayError(w io.Writer, body string) {
+	fmt.Fprintf(w, "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
+}
+
 func (a *Agent) handleStream(stream net.Conn) {
 	defer stream.Close()
 	p, err := tunnel.ReadPreamble(stream)
@@ -179,12 +187,14 @@ func (a *Agent) handleStream(stream net.Conn) {
 	svcAddr, ok := a.routes.Match(p.Host)
 	if !ok {
 		log.Warn("stream.no_route", "host", p.Host)
+		writeGatewayError(stream, "coen: no backend for host\n")
 		return
 	}
 	log.Info("stream.accept")
 	svc, err := (&net.Dialer{Timeout: 10 * time.Second}).Dial("tcp", svcAddr)
 	if err != nil {
 		log.Error("service.dial_error", "address", svcAddr, "error", err.Error())
+		writeGatewayError(stream, "coen: backend unreachable\n")
 		return
 	}
 	a.state.StreamOpened()

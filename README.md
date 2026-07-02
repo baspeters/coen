@@ -559,8 +559,13 @@ The edge answers with a plain HTTP status when it cannot forward:
 | --- | --- |
 | `400` | The request head was malformed, missing a `Host`, oversized, or not sent before `read_header_timeout`. |
 | `404` | No route matched the `Host`. |
-| `502` | A route matched but its agent is not connected, or a tunnel stream could not be opened. |
+| `502` | A route matched but its agent is offline, a tunnel stream could not be opened, or the agent could not reach its backend. |
 | `503` | A global or per-route connection cap was reached. |
+
+When the agent itself cannot reach a backend (the local service is down, or the agent has no
+route for the host), it writes a `502` back through the tunnel, so the client gets a proper
+error rather than a dropped connection. The failure is logged on the agent with the request's
+`conn_id`.
 
 ### Listener hardening (edge)
 

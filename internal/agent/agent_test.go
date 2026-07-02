@@ -664,7 +664,16 @@ func TestHandleStreamRoutesToBackendByHost(t *testing.T) {
 	_ = client.Close()
 }
 
-func TestHandleStreamNoRouteClosesStream(t *testing.T) {
+// readStreamResponse reads everything the agent wrote into the stream. The agent
+// writes its response then closes, so ReadAll returns on EOF.
+func readStreamResponse(t *testing.T, client net.Conn) string {
+	t.Helper()
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	b, _ := io.ReadAll(client)
+	return string(b)
+}
+
+func TestHandleStreamNoRouteReturns502(t *testing.T) {
 	a := &Agent{
 		log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		state:  &obs.State{},
@@ -675,11 +684,36 @@ func TestHandleStreamNoRouteClosesStream(t *testing.T) {
 	if err := tunnel.WritePreamble(client, tunnel.Preamble{ConnID: "x", Host: "unknown.example.com"}); err != nil {
 		t.Fatal(err)
 	}
-	// With no matching route the agent closes the stream without dialing.
-	buf := make([]byte, 4)
-	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
-	if _, err := client.Read(buf); err == nil {
-		t.Fatal("expected stream to be closed for an unrouted host")
+	// A host the agent has no backend for gets a 502, not an empty reply.
+	got := readStreamResponse(t, client)
+	if !strings.Contains(got, "502 Bad Gateway") || !strings.Contains(got, "coen: no backend for host") {
+		t.Fatalf("expected a 502 response, got %q", got)
+	}
+	_ = client.Close()
+}
+
+func TestHandleStreamBackendUnreachableReturns502(t *testing.T) {
+	// A guaranteed-closed backend port so the dial fails fast.
+	dead, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadAddr := dead.Addr().String()
+	_ = dead.Close()
+
+	a := &Agent{
+		log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		state:  &obs.State{},
+		routes: route.Build([]route.Entry[string]{{Pattern: "app.example.com", Value: deadAddr}}),
+	}
+	client, streamSide := net.Pipe()
+	go a.handleStream(streamSide)
+	if err := tunnel.WritePreamble(client, tunnel.Preamble{ConnID: "x", Host: "app.example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	got := readStreamResponse(t, client)
+	if !strings.Contains(got, "502 Bad Gateway") || !strings.Contains(got, "coen: backend unreachable") {
+		t.Fatalf("expected a 502 response when the backend is down, got %q", got)
 	}
 	_ = client.Close()
 }
