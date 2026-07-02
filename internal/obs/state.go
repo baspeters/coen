@@ -65,15 +65,15 @@ func (s *State) HandshakeFail()    { s.handshakeFail.Add(1) }
 func (s *State) SetError(e string) { s.lastError.Store(e) }
 
 type Snapshot struct {
-	TunnelConnected bool      `json:"tunnel_connected"`
-	ConnectedSince  time.Time `json:"connected_since,omitzero"`
-	ActiveStreams   int64     `json:"active_streams"`
-	TotalStreams    int64     `json:"total_streams"`
-	BytesIn         int64     `json:"bytes_in"`
-	BytesOut        int64     `json:"bytes_out"`
-	Reconnects      int64     `json:"reconnects"`
-	HandshakeOK     int64     `json:"handshake_ok"`
-	HandshakeFail   int64     `json:"handshake_fail"`
+	TunnelConnected bool        `json:"tunnel_connected"`
+	ConnectedSince  time.Time   `json:"connected_since,omitzero"`
+	ActiveStreams   int64       `json:"active_streams"`
+	TotalStreams    int64       `json:"total_streams"`
+	BytesIn         int64       `json:"bytes_in"`
+	BytesOut        int64       `json:"bytes_out"`
+	Reconnects      int64       `json:"reconnects"`
+	HandshakeOK     int64       `json:"handshake_ok"`
+	HandshakeFail   int64       `json:"handshake_fail"`
 	LastError       string      `json:"last_error,omitempty"`
 	PeerFingerprint string      `json:"peer_fingerprint,omitempty"`
 	Agents          []AgentInfo `json:"agents,omitempty"`
