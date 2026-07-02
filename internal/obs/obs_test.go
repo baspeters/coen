@@ -3,6 +3,7 @@ package obs
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"strings"
 	"testing"
@@ -39,6 +40,38 @@ func TestNewLoggerEmitsAndLevelVarControls(t *testing.T) {
 	}
 }
 
+func TestNewLoggerJSONFormat(t *testing.T) {
+	var buf bytes.Buffer
+	log, _, err := NewLogger("info", "json", &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log.Info("hello", "key", "value")
+
+	var decoded map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
+		t.Fatalf("json format did not emit valid JSON: %v (line=%q)", err, buf.String())
+	}
+	if decoded["msg"] != "hello" {
+		t.Fatalf("bad msg field: %+v", decoded)
+	}
+	if decoded["key"] != "value" {
+		t.Fatalf("bad key field: %+v", decoded)
+	}
+}
+
+func TestNewLoggerUnknownFormat(t *testing.T) {
+	if _, _, err := NewLogger("info", "xml", io.Discard); err == nil {
+		t.Fatal("expected error for unknown log format")
+	}
+}
+
+func TestNewLoggerInvalidLevel(t *testing.T) {
+	if _, _, err := NewLogger("bogus", "text", io.Discard); err == nil {
+		t.Fatal("expected error for invalid log level")
+	}
+}
+
 func TestNewIDUnique(t *testing.T) {
 	a, b := NewID(), NewID()
 	if a == b {
@@ -61,6 +94,57 @@ func TestStateSnapshot(t *testing.T) {
 	}
 	if snap.PeerFingerprint != "SHA256:abc" {
 		t.Fatalf("bad fp: %+v", snap)
+	}
+}
+
+func TestStateHandshakeErrorAndDisconnect(t *testing.T) {
+	var s State
+	s.HandshakeFail()
+	s.HandshakeFail()
+	s.HandshakeOK()
+	s.SetError("boom")
+	s.Reconnect()
+	s.Reconnect()
+
+	s.SetConnected("SHA256:xyz")
+	s.StreamOpened()
+	s.StreamOpened()
+	s.StreamClosed(3, 4) // one of two streams closes; active count should decrement, not zero
+
+	snap := s.Snapshot()
+	if snap.HandshakeFail != 2 {
+		t.Fatalf("HandshakeFail = %d, want 2", snap.HandshakeFail)
+	}
+	if snap.HandshakeOK != 1 {
+		t.Fatalf("HandshakeOK = %d, want 1", snap.HandshakeOK)
+	}
+	if snap.LastError != "boom" {
+		t.Fatalf("LastError = %q, want %q", snap.LastError, "boom")
+	}
+	if snap.Reconnects != 2 {
+		t.Fatalf("Reconnects = %d, want 2", snap.Reconnects)
+	}
+	if snap.TotalStreams != 2 {
+		t.Fatalf("TotalStreams = %d, want 2", snap.TotalStreams)
+	}
+	if snap.ActiveStreams != 1 {
+		t.Fatalf("ActiveStreams = %d, want 1 (one of two streams closed)", snap.ActiveStreams)
+	}
+	if snap.BytesIn != 3 || snap.BytesOut != 4 {
+		t.Fatalf("bytes = in:%d out:%d, want in:3 out:4", snap.BytesIn, snap.BytesOut)
+	}
+
+	s.SetDisconnected()
+	snap2 := s.Snapshot()
+	if snap2.TunnelConnected {
+		t.Fatal("expected TunnelConnected=false after SetDisconnected")
+	}
+	if !snap2.ConnectedSince.IsZero() {
+		t.Fatalf("expected zero ConnectedSince once disconnected, got %v", snap2.ConnectedSince)
+	}
+	// Disconnecting must not clobber counters accumulated before it.
+	if snap2.HandshakeFail != 2 || snap2.HandshakeOK != 1 || snap2.LastError != "boom" {
+		t.Fatalf("SetDisconnected should not reset other counters: %+v", snap2)
 	}
 }
 

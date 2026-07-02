@@ -11,3 +11,8 @@ coverage:
 comment:
   layout: "reach, diff, files"
   require_changes: false
+
+# The process entrypoint is a two-line main() that only calls cli.Execute();
+# it is exercised by the binary itself, not unit-testable in isolation.
+ignore:
+  - "cmd/coen"

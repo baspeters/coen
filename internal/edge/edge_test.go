@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -333,5 +334,312 @@ func TestEdgeClosesAgentSessionOnShutdown(t *testing.T) {
 			t.Fatal("edge did not tear down the agent session / clear state on shutdown")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestListenIngressProxiedReturnsPlainListener(t *testing.T) {
+	e, tunLn, ingressLn, _ := newTestEdge(t)
+	defer tunLn.Close()
+	defer ingressLn.Close()
+
+	ln, err := e.listenIngress()
+	if err != nil {
+		t.Fatalf("listenIngress: %v", err)
+	}
+	defer ln.Close()
+
+	if _, ok := ln.(*net.TCPListener); !ok {
+		t.Fatalf("expected a plain *net.TCPListener in proxied mode, got %T", ln)
+	}
+}
+
+func TestListenIngressStandaloneReturnsTLSListener(t *testing.T) {
+	ca, err := pki.CreateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	caPath := filepath.Join(dir, "ca.crt")
+	tunCertPath := filepath.Join(dir, "tunnel.crt")
+	tunKeyPath := filepath.Join(dir, "tunnel.key")
+	_ = os.WriteFile(caPath, ca.CertPEM(), 0o600)
+	tcPEM, tkPEM, _ := ca.IssueServer("127.0.0.1")
+	_ = os.WriteFile(tunCertPath, tcPEM, 0o600)
+	_ = os.WriteFile(tunKeyPath, tkPEM, 0o600)
+
+	pubCertPath := filepath.Join(dir, "public.crt")
+	pubKeyPath := filepath.Join(dir, "public.key")
+	pcPEM, pkPEM, _ := ca.IssueServer("127.0.0.1")
+	_ = os.WriteFile(pubCertPath, pcPEM, 0o600)
+	_ = os.WriteFile(pubKeyPath, pkPEM, 0o600)
+
+	cfg := &config.EdgeConfig{
+		Ingress: config.IngressConfig{
+			Mode:   "standalone",
+			Listen: "127.0.0.1:0",
+			TLS:    config.TLSFiles{Cert: pubCertPath, Key: pubKeyPath},
+		},
+		Tunnel: config.TunnelServerConfig{Listen: "127.0.0.1:0", CA: caPath, Cert: tunCertPath, Key: tunKeyPath},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	e, err := New(cfg, log, &obs.State{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ln, err := e.listenIngress()
+	if err != nil {
+		t.Fatalf("listenIngress: %v", err)
+	}
+	defer ln.Close()
+
+	// Prove the listener actually speaks TLS by completing a real handshake
+	// against it from a client that trusts the issuing CA.
+	srvErr := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			srvErr <- err
+			return
+		}
+		defer conn.Close()
+		tlsConn, ok := conn.(*tls.Conn)
+		if !ok {
+			srvErr <- errors.New("accepted conn is not *tls.Conn")
+			return
+		}
+		srvErr <- tlsConn.Handshake()
+	}()
+
+	pool, _ := pki.CertPoolFromPEM(ca.CertPEM())
+	clientConn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{RootCAs: pool, ServerName: "127.0.0.1"})
+	if err != nil {
+		t.Fatalf("client dial/handshake: %v", err)
+	}
+	defer clientConn.Close()
+
+	select {
+	case err := <-srvErr:
+		if err != nil {
+			t.Fatalf("server handshake: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not complete handshake")
+	}
+}
+
+func TestListenIngressUnknownModeReturnsError(t *testing.T) {
+	e, tunLn, ingressLn, _ := newTestEdge(t)
+	defer tunLn.Close()
+	defer ingressLn.Close()
+
+	e.cfg.Ingress.Mode = "bogus"
+	ln, err := e.listenIngress()
+	if err == nil {
+		_ = ln.Close()
+		t.Fatal("expected error for unknown ingress mode")
+	}
+}
+
+func TestRunStartsAndStopsOnCancel(t *testing.T) {
+	e, preTunLn, preIngressLn, _ := newTestEdge(t)
+	// newTestEdge builds e.cfg with ephemeral 127.0.0.1:0 listen addresses and
+	// real temp-file PKI already; Run() binds its own listeners from that
+	// config, so the pre-built listeners here are unused.
+	_ = preTunLn.Close()
+	_ = preIngressLn.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- e.Run(ctx) }()
+
+	cancel()
+
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return within 2s of context cancellation")
+	}
+}
+
+func TestServeAgentClosesNonTLSConn(t *testing.T) {
+	e, tunLn, ingressLn, _ := newTestEdge(t)
+	defer tunLn.Close()
+	defer ingressLn.Close()
+
+	serverSide, testSide := net.Pipe()
+	defer testSide.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.serveAgent(serverSide)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("serveAgent did not return for a non-TLS conn")
+	}
+
+	// serveAgent should have closed its side; the peer must observe that.
+	if _, err := testSide.Read(make([]byte, 1)); err == nil {
+		t.Fatal("expected read on peer to fail after serveAgent closed the non-TLS conn")
+	}
+}
+
+func TestServeAgentFailedHandshakeNoClientCert(t *testing.T) {
+	e, tunLn, ingressLn, _ := newTestEdge(t)
+	defer tunLn.Close()
+	defer ingressLn.Close()
+
+	if got := e.state.Snapshot().HandshakeFail; got != 0 {
+		t.Fatalf("expected handshake fail counter to start at 0, got %d", got)
+	}
+
+	acceptDone := make(chan struct{})
+	go func() {
+		defer close(acceptDone)
+		conn, err := tunLn.Accept()
+		if err != nil {
+			return
+		}
+		e.serveAgent(conn)
+	}()
+
+	// Client presents no certificate; the server requires one and must fail
+	// the handshake.
+	clientConn, dialErr := tls.Dial("tcp", tunLn.Addr().String(), &tls.Config{InsecureSkipVerify: true})
+	if dialErr == nil {
+		_ = clientConn.Close()
+	}
+
+	select {
+	case <-acceptDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("serveAgent did not return after a failed handshake")
+	}
+
+	if e.session.Load() != nil {
+		t.Fatal("session should remain nil after a failed handshake")
+	}
+	if got := e.state.Snapshot().HandshakeFail; got != 1 {
+		t.Fatalf("expected handshake fail counter = 1, got %d", got)
+	}
+}
+
+func TestNewMissingCAFile(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.EdgeConfig{
+		Tunnel: config.TunnelServerConfig{CA: filepath.Join(dir, "does-not-exist.crt")},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if _, err := New(cfg, log, &obs.State{}); err == nil {
+		t.Fatal("expected error for a missing tunnel CA file")
+	}
+}
+
+func TestNewInvalidCAPEM(t *testing.T) {
+	dir := t.TempDir()
+	caPath := filepath.Join(dir, "ca.crt")
+	if err := os.WriteFile(caPath, []byte("not a valid PEM certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.EdgeConfig{Tunnel: config.TunnelServerConfig{CA: caPath}}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if _, err := New(cfg, log, &obs.State{}); err == nil {
+		t.Fatal("expected error for an invalid CA PEM file")
+	}
+}
+
+// TestRunFailsWhenTunnelListenAddrInUse exercises Run's first error branch:
+// the tunnel TLS listener fails to bind because something else already holds
+// the port. Run must return that error without ever reaching Serve.
+func TestRunFailsWhenTunnelListenAddrInUse(t *testing.T) {
+	e, preTunLn, preIngressLn, _ := newTestEdge(t)
+	// newTestEdge's pre-built listeners are unused here; Run binds its own
+	// from e.cfg.
+	_ = preTunLn.Close()
+	_ = preIngressLn.Close()
+
+	conflict, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conflict.Close()
+	e.cfg.Tunnel.Listen = conflict.Addr().String()
+
+	if err := e.Run(context.Background()); err == nil {
+		t.Fatal("expected Run to fail when the tunnel listen address is already in use")
+	}
+}
+
+// TestRunFailsWhenIngressCertMissing exercises Run's second error branch: the
+// tunnel listener binds fine (valid PKI), but standalone ingress mode points
+// at a public cert/key pair that doesn't exist, so listenIngress fails and
+// Run must close the tunnel listener and return the error before ever
+// calling Serve.
+func TestRunFailsWhenIngressCertMissing(t *testing.T) {
+	ca, err := pki.CreateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	caPath := filepath.Join(dir, "ca.crt")
+	tunCertPath := filepath.Join(dir, "tunnel.crt")
+	tunKeyPath := filepath.Join(dir, "tunnel.key")
+	_ = os.WriteFile(caPath, ca.CertPEM(), 0o600)
+	tcPEM, tkPEM, _ := ca.IssueServer("127.0.0.1")
+	_ = os.WriteFile(tunCertPath, tcPEM, 0o600)
+	_ = os.WriteFile(tunKeyPath, tkPEM, 0o600)
+
+	cfg := &config.EdgeConfig{
+		Ingress: config.IngressConfig{
+			Mode:   "standalone",
+			Listen: "127.0.0.1:0",
+			TLS: config.TLSFiles{
+				Cert: filepath.Join(dir, "missing-public.crt"),
+				Key:  filepath.Join(dir, "missing-public.key"),
+			},
+		},
+		Tunnel: config.TunnelServerConfig{Listen: "127.0.0.1:0", CA: caPath, Cert: tunCertPath, Key: tunKeyPath},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	e, err := New(cfg, log, &obs.State{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := e.Run(context.Background()); err == nil {
+		t.Fatal("expected Run to fail when the standalone ingress cert/key files are missing")
+	}
+}
+
+func TestNewMismatchedCertKeyPair(t *testing.T) {
+	ca, err := pki.CreateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	caPath := filepath.Join(dir, "ca.crt")
+	_ = os.WriteFile(caPath, ca.CertPEM(), 0o600)
+
+	certPEM, _, _ := ca.IssueServer("127.0.0.1")
+	_, otherKeyPEM, _ := ca.IssueServer("127.0.0.1")
+
+	certPath := filepath.Join(dir, "edge.crt")
+	keyPath := filepath.Join(dir, "edge.key")
+	_ = os.WriteFile(certPath, certPEM, 0o600)
+	_ = os.WriteFile(keyPath, otherKeyPEM, 0o600)
+
+	cfg := &config.EdgeConfig{
+		Tunnel: config.TunnelServerConfig{CA: caPath, Cert: certPath, Key: keyPath},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if _, err := New(cfg, log, &obs.State{}); err == nil {
+		t.Fatal("expected error for a mismatched cert/key pair")
 	}
 }
