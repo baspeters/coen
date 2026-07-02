@@ -18,9 +18,10 @@ import (
 )
 
 // routeState is the per-route value stored in the matcher: the owning agent
-// fingerprint (and, from Task 9, an optional per-route connection cap).
+// fingerprint and an optional per-route connection cap.
 type routeState struct {
 	fingerprint string
+	sem         *semaphore
 }
 
 type Edge struct {
@@ -31,6 +32,7 @@ type Edge struct {
 	allowed map[string]bool
 	reg     *registry
 	routes  *route.Matcher[*routeState]
+	sem     *semaphore // global ingress connection cap
 }
 
 func New(cfg *config.EdgeConfig, log *slog.Logger, state *obs.State) (*Edge, error) {
@@ -46,10 +48,10 @@ func New(cfg *config.EdgeConfig, log *slog.Logger, state *obs.State) (*Edge, err
 	if err != nil {
 		return nil, fmt.Errorf("load edge cert: %w", err)
 	}
-	e := &Edge{cfg: cfg, log: log, state: state, tunTLS: tunnel.ServerTLSConfig(pool, cert), allowed: cfg.AllowedFingerprints(), reg: newRegistry()}
+	e := &Edge{cfg: cfg, log: log, state: state, tunTLS: tunnel.ServerTLSConfig(pool, cert), allowed: cfg.AllowedFingerprints(), reg: newRegistry(), sem: newSemaphore(cfg.Ingress.MaxConnections)}
 	entries := make([]route.Entry[*routeState], 0, len(cfg.Routes))
 	for _, r := range cfg.Routes {
-		entries = append(entries, route.Entry[*routeState]{Pattern: r.Host, Value: &routeState{fingerprint: r.AgentFingerprint}})
+		entries = append(entries, route.Entry[*routeState]{Pattern: r.Host, Value: &routeState{fingerprint: r.AgentFingerprint, sem: newSemaphore(r.MaxConnections)}})
 	}
 	e.routes = route.Build(entries)
 	return e, nil
@@ -166,6 +168,14 @@ func (e *Edge) handleIngress(conn net.Conn) {
 	connID := obs.NewID()
 	log := e.log.With("conn_id", connID, "client_addr", conn.RemoteAddr().String())
 
+	if !e.sem.tryAcquire() {
+		log.Warn("ingress.rejected", "reason", "max_connections")
+		writeStatus(conn, 503, "Service Unavailable", "coen: too many connections\n")
+		_ = conn.Close()
+		return
+	}
+	defer e.sem.release()
+
 	head, host, err := readRequestHead(conn, maxHeaderBytes)
 	if err != nil {
 		log.Warn("ingress.bad_request", "error", err.Error())
@@ -183,6 +193,14 @@ func (e *Edge) handleIngress(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
+	if !rs.sem.tryAcquire() {
+		log.Warn("ingress.rejected", "reason", "route_max_connections")
+		writeStatus(conn, 503, "Service Unavailable", "coen: too many connections\n")
+		_ = conn.Close()
+		return
+	}
+	defer rs.sem.release()
+
 	session, ok := e.reg.get(rs.fingerprint)
 	if !ok {
 		log.Warn("ingress.no_agent", "agent_fp", rs.fingerprint)

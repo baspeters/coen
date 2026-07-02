@@ -731,3 +731,56 @@ func TestHandleIngressRoutesByHost(t *testing.T) {
 	}
 	_ = c2.Close()
 }
+
+func TestGlobalConnectionCap(t *testing.T) {
+	e := &Edge{
+		log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		state: &obs.State{},
+		reg:   newRegistry(),
+		routes: route.Build([]route.Entry[*routeState]{
+			{Pattern: "*", Value: &routeState{fingerprint: "FP"}},
+		}),
+		sem: newSemaphore(1),
+	}
+	// Occupy the only global slot.
+	if !e.sem.tryAcquire() {
+		t.Fatal("setup acquire failed")
+	}
+	client, edgeConn := net.Pipe()
+	go e.handleIngress(edgeConn)
+	go func() { _, _ = client.Write([]byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n")) }()
+	buf := make([]byte, 64)
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, _ := client.Read(buf)
+	if !strings.Contains(string(buf[:n]), "503") {
+		t.Fatalf("expected 503, got %q", buf[:n])
+	}
+	_ = client.Close()
+}
+
+func TestPerRouteConnectionCap(t *testing.T) {
+	srv, cli := newServerSession(t)
+	defer cli.Close()
+	rs := &routeState{fingerprint: "FP", sem: newSemaphore(1)}
+	e := &Edge{
+		log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		state:  &obs.State{},
+		reg:    newRegistry(),
+		routes: route.Build([]route.Entry[*routeState]{{Pattern: "*", Value: rs}}),
+	}
+	e.reg.set("FP", srv)
+	// Occupy the route's only slot.
+	if !rs.sem.tryAcquire() {
+		t.Fatal("setup acquire failed")
+	}
+	client, edgeConn := net.Pipe()
+	go e.handleIngress(edgeConn)
+	go func() { _, _ = client.Write([]byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n")) }()
+	buf := make([]byte, 64)
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, _ := client.Read(buf)
+	if !strings.Contains(string(buf[:n]), "503") {
+		t.Fatalf("expected 503 from per-route cap, got %q", buf[:n])
+	}
+	_ = client.Close()
+}
