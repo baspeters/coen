@@ -95,3 +95,72 @@ func TestAgentBridgesStreamToService(t *testing.T) {
 		t.Fatal("timed out waiting for echo through agent")
 	}
 }
+
+func TestAgentRunReturnsOnCtxCancelWhileConnected(t *testing.T) {
+	ca, err := pki.CreateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	caPath := filepath.Join(dir, "ca.crt")
+	certPath := filepath.Join(dir, "agent.crt")
+	keyPath := filepath.Join(dir, "agent.key")
+	_ = os.WriteFile(caPath, ca.CertPEM(), 0o600)
+	acPEM, akPEM, _ := ca.IssueClient("agent-1")
+	_ = os.WriteFile(certPath, acPEM, 0o600)
+	_ = os.WriteFile(keyPath, akPEM, 0o600)
+	edgeCertPEM, edgeKeyPEM, _ := ca.IssueServer("127.0.0.1")
+	edgeCert, _ := tls.X509KeyPair(edgeCertPEM, edgeKeyPEM)
+	pool, _ := pki.CertPoolFromPEM(ca.CertPEM())
+
+	tcpLn, _ := net.Listen("tcp", "127.0.0.1:0")
+	edgeLn := tls.NewListener(tcpLn, tunnel.ServerTLSConfig(pool, edgeCert))
+	defer edgeLn.Close()
+
+	// Fake edge: accept, establish a yamux session, then stay idle (open no streams)
+	// until the session closes (which happens when the agent shuts down).
+	go func() {
+		conn, err := edgeLn.Accept()
+		if err != nil {
+			return
+		}
+		sess, err := tunnel.ServerSession(conn)
+		if err != nil {
+			return
+		}
+		defer sess.Close()
+		<-sess.CloseChan()
+	}()
+
+	cfg := &config.AgentConfig{
+		Edge:      config.EdgeRef{Address: edgeLn.Addr().String(), CA: caPath, Cert: certPath, Key: keyPath},
+		Service:   config.ServiceConfig{Address: "127.0.0.1:1"}, // never dialed (no streams)
+		Reconnect: config.ReconnectConfig{MinBackoff: config.Duration(10 * time.Millisecond), MaxBackoff: config.Duration(50 * time.Millisecond)},
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	state := &obs.State{}
+	a, err := New(cfg, log, state)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- a.Run(ctx) }()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !state.Snapshot().TunnelConnected {
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("agent never connected")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return within 2s after ctx cancel while connected/idle")
+	}
+}

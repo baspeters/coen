@@ -106,6 +106,17 @@ func (a *Agent) connectOnce(ctx context.Context) (established bool, err error) {
 		return true, fmt.Errorf("yamux client: %w", err)
 	}
 	defer session.Close()
+	// Close the session when the context is cancelled so AcceptStream unblocks
+	// and Run can return promptly on shutdown.
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = session.Close()
+		case <-stop:
+		}
+	}()
 	for {
 		stream, err := session.AcceptStream()
 		if err != nil {
