@@ -3,7 +3,6 @@
 # Coen
 
 [![CI](https://github.com/baspeters/coen/actions/workflows/ci.yml/badge.svg)](https://github.com/baspeters/coen/actions/workflows/ci.yml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/baspeters/coen)](https://goreportcard.com/report/github.com/baspeters/coen)
 [![Go Reference](https://pkg.go.dev/badge/github.com/baspeters/coen.svg)](https://pkg.go.dev/github.com/baspeters/coen)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![Go 1.25+](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)
