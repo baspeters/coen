@@ -159,8 +159,14 @@ func (e *Edge) serveAgent(conn net.Conn) {
 		return
 	}
 	e.state.HandshakeOK()
-	if prev := e.reg.set(fp, session); prev != nil {
-		_ = prev.Close()
+	if !e.reg.register(fp, session) {
+		// A live agent already owns this fingerprint. Keep it and drop this
+		// connection so a probe (e.g. `coen doctor`) or a duplicate cert cannot
+		// disrupt a serving agent. The handshake already succeeded, so a
+		// doctor probe still reports success.
+		e.log.Warn("agent.duplicate_fingerprint", "peer_fp", fp)
+		_ = session.Close()
+		return
 	}
 	e.state.AgentConnected(fp)
 	e.log.Info("agent.connected", "peer_fp", fp)

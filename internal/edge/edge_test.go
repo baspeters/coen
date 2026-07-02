@@ -267,16 +267,8 @@ func TestEdgeReconnectDoesNotFlipStateToDisconnected(t *testing.T) {
 		return sess
 	}
 
-	// Stub agent #1: connect and stay idle until the edge closes its session
-	// (which happens when agent #2 replaces it).
+	// Agent #1 connects, then its connection drops (a real reconnect scenario).
 	sess1 := dialAgent()
-	defer sess1.Close()
-	done1 := make(chan struct{})
-	go func() {
-		defer close(done1)
-		<-sess1.CloseChan()
-	}()
-
 	deadline := time.Now().Add(2 * time.Second)
 	for e.reg.size() == 0 || agentsConnected(e) == 0 {
 		if time.Now().After(deadline) {
@@ -284,47 +276,87 @@ func TestEdgeReconnectDoesNotFlipStateToDisconnected(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	firstSession := e.reg.any()
+	_ = sess1.Close() // agent #1 drops
 
-	// Stub agent #2: connect, replacing agent #1's session (the edge closes
-	// #1's session as part of admitting #2).
+	// Agent #2 reconnects with the same fingerprint. Once #1's session is
+	// reaped, #2 registers. The old goroutine unwinding must never leave the
+	// edge showing zero agents.
 	sess2 := dialAgent()
 	defer sess2.Close()
-	done2 := make(chan struct{})
-	go func() {
-		defer close(done2)
-		<-sess2.CloseChan()
-	}()
-
 	deadline = time.Now().Add(2 * time.Second)
-	for {
-		cur := e.reg.any()
-		if cur != nil && cur != firstSession {
-			break
-		}
+	for agentsConnected(e) == 0 || e.reg.any() == nil {
 		if time.Now().After(deadline) {
-			t.Fatal("agent #2 never registered (session did not change)")
+			t.Fatal("agent #2 never registered after reconnect")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// Poll for ~1s: connected state must never flip false, and the session
-	// must remain registered, even though agent #1's goroutine is unwinding
-	// from its now-closed session.
+	// Poll ~1s: the agent must stay registered; the old goroutine's remove()
+	// must not flip state to disconnected.
 	pollDeadline := time.Now().Add(1 * time.Second)
 	for time.Now().Before(pollDeadline) {
 		if agentsConnected(e) == 0 {
-			t.Fatal("TunnelConnected flipped false after agent #2 replaced agent #1")
+			t.Fatal("agent count flipped to zero after reconnect")
 		}
 		if e.reg.any() == nil {
-			t.Fatal("session became nil after agent #2 replaced agent #1")
+			t.Fatal("session became nil after reconnect")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+}
+
+// TestEdgeProbeDoesNotDisplaceLiveAgent is the regression test for a `coen
+// doctor` style handshake probe: a second connection presenting the same
+// client certificate must NOT evict the serving agent.
+func TestEdgeProbeDoesNotDisplaceLiveAgent(t *testing.T) {
+	e, tunLn, ingressLn, agentTLS := newTestEdge(t)
+	defer tunLn.Close()
+	defer ingressLn.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = e.Serve(ctx, tunLn, ingressLn) }()
+
+	// Real agent: establish a session and keep it open.
+	raw, err := tls.Dial("tcp", tunLn.Addr().String(), agentTLS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := tunnel.ClientSession(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for e.reg.size() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("agent never registered")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	cancel()
-	<-done1
-	<-done2
+	// Probe: same cert, complete the mTLS handshake, then close immediately
+	// (exactly what `coen doctor --role agent` does).
+	probe, err := tls.Dial("tcp", tunLn.Addr().String(), agentTLS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = probe.Close()
+
+	// For ~600ms the serving agent must remain registered and its session open.
+	pollDeadline := time.Now().Add(600 * time.Millisecond)
+	for time.Now().Before(pollDeadline) {
+		if e.reg.size() != 1 {
+			t.Fatalf("registry size = %d, want 1 (probe must not add or evict)", e.reg.size())
+		}
+		if sess.IsClosed() {
+			t.Fatal("the serving agent's session was closed by the probe")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if agentsConnected(e) != 1 {
+		t.Fatalf("agents connected = %d, want 1", agentsConnected(e))
+	}
 }
 
 func TestEdgeClosesAgentSessionOnShutdown(t *testing.T) {

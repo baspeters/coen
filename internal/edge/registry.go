@@ -25,6 +25,22 @@ func (r *registry) set(fp string, s *yamux.Session) (prev *yamux.Session) {
 	return prev
 }
 
+// register stores s as the session for fp unless a still-live session already
+// owns fp, in which case the incumbent is kept and false is returned. A dead
+// incumbent (its connection already gone) is replaced. This stops a serving
+// agent from being displaced by a transient same-fingerprint connection such as
+// a `coen doctor` handshake probe or a duplicate agent certificate; a genuine
+// reconnect is unaffected because the old session is already closed by then.
+func (r *registry) register(fp string, s *yamux.Session) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if cur, ok := r.sessions[fp]; ok && cur != s && !cur.IsClosed() {
+		return false
+	}
+	r.sessions[fp] = s
+	return true
+}
+
 func (r *registry) get(fp string) (*yamux.Session, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

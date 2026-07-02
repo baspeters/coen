@@ -60,3 +60,38 @@ func (r *registry) any() *yamux.Session {
 	}
 	return nil
 }
+
+func TestRegistryRegisterKeepsLiveIncumbent(t *testing.T) {
+	r := newRegistry()
+	inc, incCli := newServerSession(t)
+	defer incCli.Close()
+	if !r.register("AA", inc) {
+		t.Fatal("first register should succeed")
+	}
+	// A second live session for the same fingerprint must be refused so a
+	// serving agent is never displaced by a probe or a duplicate cert.
+	dup, dupCli := newServerSession(t)
+	defer dupCli.Close()
+	if r.register("AA", dup) {
+		t.Fatal("register over a live incumbent must be refused")
+	}
+	if got, _ := r.get("AA"); got != inc {
+		t.Fatal("the live incumbent must be retained")
+	}
+}
+
+func TestRegistryRegisterReplacesDeadIncumbent(t *testing.T) {
+	r := newRegistry()
+	dead, deadCli := newServerSession(t)
+	_ = dead.Close()
+	_ = deadCli.Close()
+	r.set("AA", dead) // inject a dead incumbent
+	live, liveCli := newServerSession(t)
+	defer liveCli.Close()
+	if !r.register("AA", live) {
+		t.Fatal("register over a dead incumbent should succeed")
+	}
+	if got, _ := r.get("AA"); got != live {
+		t.Fatal("the live session should have replaced the dead incumbent")
+	}
+}
