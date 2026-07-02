@@ -1,7 +1,7 @@
 coverage:
   precision: 1
   round: down
-  range: "85...100"        # badge color: red below 85, green toward 100
+  range: "70...90"         # badge color: red at/below 70, full green at 90+
   status:
     project:
       default:
