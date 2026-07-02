@@ -1,0 +1,15 @@
+edge:
+  address: edge.example.com:2636
+  ca:   /etc/coen/pki/ca.crt
+  cert: /etc/coen/pki/agent.crt
+  key:  /etc/coen/pki/agent.key
+service:
+  address: 127.0.0.1:8080
+reconnect:
+  min_backoff: 1s
+  max_backoff: 30s
+log:
+  level: info
+  format: text
+admin:
+  socket: /run/coen/agent.sock

@@ -1,0 +1,22 @@
+[Unit]
+Description=Coen agent (private tunnel endpoint)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={{.Bin}} agent --config {{.Config}}
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2
+User=coen
+Group=coen
+RuntimeDirectory=coen
+RuntimeDirectoryMode=0750
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/etc/coen /run/coen
+
+[Install]
+WantedBy=multi-user.target

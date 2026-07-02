@@ -1,0 +1,16 @@
+ingress:
+  mode: standalone          # standalone | proxied
+  listen: ":443"            # standalone; use "127.0.0.1:8000" for proxied
+  tls:
+    cert: /etc/coen/certs/public.crt
+    key:  /etc/coen/certs/public.key
+tunnel:
+  listen: ":2636"
+  ca:   /etc/coen/pki/ca.crt
+  cert: /etc/coen/pki/edge.crt
+  key:  /etc/coen/pki/edge.key
+log:
+  level: info
+  format: text
+admin:
+  socket: /run/coen/edge.sock
