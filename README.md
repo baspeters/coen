@@ -142,7 +142,7 @@ sequenceDiagram
     Note over E,A: Persistent mTLS + yamux tunnel on :2636
     C->>E: HTTPS request, TLS terminated at edge or nginx
     E->>E: Read the Host header, match a route, pick the owning agent
-    E->>A: Open a yamux stream; preamble carries conn_id, client_addr, Host
+    E->>A: Open a yamux stream, preamble carries conn_id, client_addr, Host
     A->>B: Dial the backend that the agent maps this Host to
     C->>B: request bytes piped through the tunnel
     B->>C: response bytes piped back
