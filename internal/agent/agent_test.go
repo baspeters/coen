@@ -648,7 +648,7 @@ func TestHandleStreamRoutesToBackendByHost(t *testing.T) {
 	}
 
 	client, streamSide := net.Pipe()
-	go a.handleStream(streamSide)
+	go a.handleStream(context.Background(), streamSide)
 	if err := tunnel.WritePreamble(client, tunnel.Preamble{ConnID: "x", Host: "app.example.com"}); err != nil {
 		t.Fatal(err)
 	}
@@ -680,7 +680,7 @@ func TestHandleStreamNoRouteReturns502(t *testing.T) {
 		routes: route.Build([]route.Entry[string]{{Pattern: "app.example.com", Value: "127.0.0.1:1"}}),
 	}
 	client, streamSide := net.Pipe()
-	go a.handleStream(streamSide)
+	go a.handleStream(context.Background(), streamSide)
 	if err := tunnel.WritePreamble(client, tunnel.Preamble{ConnID: "x", Host: "unknown.example.com"}); err != nil {
 		t.Fatal(err)
 	}
@@ -707,7 +707,7 @@ func TestHandleStreamBackendUnreachableReturns502(t *testing.T) {
 		routes: route.Build([]route.Entry[string]{{Pattern: "app.example.com", Value: deadAddr}}),
 	}
 	client, streamSide := net.Pipe()
-	go a.handleStream(streamSide)
+	go a.handleStream(context.Background(), streamSide)
 	if err := tunnel.WritePreamble(client, tunnel.Preamble{ConnID: "x", Host: "app.example.com"}); err != nil {
 		t.Fatal(err)
 	}

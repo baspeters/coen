@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"net"
@@ -33,7 +34,7 @@ func driveStream(t *testing.T, a *Agent, edgeVersion string) {
 		_ = tunnel.WritePreamble(client, tunnel.Preamble{ConnID: "c1", Host: "x", EdgeVersion: edgeVersion})
 		_, _ = io.Copy(io.Discard, client)
 	}()
-	a.handleStream(stream)
+	a.handleStream(context.Background(), stream)
 }
 
 func TestHandleStreamWarnsOnVersionMismatch(t *testing.T) {

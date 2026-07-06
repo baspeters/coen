@@ -156,18 +156,25 @@ func (a *Agent) connectOnce(ctx context.Context) (stable bool, err error) {
 		a.mu.Unlock()
 		go func() {
 			defer a.inflight.Done()
-			a.handleStream(stream)
+			a.handleStream(ctx, stream)
 		}()
 	}
 }
 
-func (a *Agent) handleStream(stream net.Conn) {
+// preambleReadTimeout bounds how long handleStream waits for a stream's preamble.
+const preambleReadTimeout = 10 * time.Second
+
+func (a *Agent) handleStream(ctx context.Context, stream net.Conn) {
 	defer stream.Close()
+	// Bound the preamble read so a stream that never sends one (a hung or
+	// misbehaving edge) cannot pin this goroutine indefinitely.
+	_ = stream.SetReadDeadline(time.Now().Add(preambleReadTimeout))
 	p, err := tunnel.ReadPreamble(stream)
 	if err != nil {
 		a.log.Warn("stream.preamble_error", "error", err.Error())
 		return
 	}
+	_ = stream.SetReadDeadline(time.Time{}) // clear before streaming
 	log := a.log.With("conn_id", p.ConnID, "client_addr", p.ClientAddr, "host", p.Host)
 	if p.EdgeVersion != a.version {
 		// Warn once per process on an edge/agent version skew (an empty
@@ -183,7 +190,7 @@ func (a *Agent) handleStream(stream net.Conn) {
 		return
 	}
 	log.Debug("stream.accept")
-	svc, err := (&net.Dialer{Timeout: 10 * time.Second}).Dial("tcp", svcAddr)
+	svc, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", svcAddr)
 	if err != nil {
 		log.Error("service.dial_error", "address", svcAddr, "error", err.Error())
 		errpage.Write(stream, 502, "Bad Gateway", "Backend unreachable", p.ConnID)
