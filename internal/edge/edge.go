@@ -119,14 +119,35 @@ func (e *Edge) drain() {
 	}
 }
 
-func (e *Edge) acceptTunnel(ctx context.Context, ln net.Listener) {
+// acceptRetryDelay bounds how long an accept loop pauses after a transient
+// Accept error before retrying, so a momentary failure (for example fd
+// exhaustion) neither permanently stops the listener nor spins hot.
+var acceptRetryDelay = 100 * time.Millisecond
+
+// acceptLoop accepts connections until ctx is cancelled, dispatching each to
+// handle. A cancelled ctx ends the loop quietly; any other Accept error is
+// logged and retried after acceptRetryDelay rather than silently ending it.
+func (e *Edge) acceptLoop(ctx context.Context, ln net.Listener, name string, handle func(net.Conn)) {
 	for ctx.Err() == nil {
 		conn, err := ln.Accept()
 		if err != nil {
-			return
+			if ctx.Err() != nil {
+				return
+			}
+			e.log.Warn("accept.error", "listener", name, "error", err.Error())
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(acceptRetryDelay):
+			}
+			continue
 		}
-		go e.serveAgent(conn)
+		handle(conn)
 	}
+}
+
+func (e *Edge) acceptTunnel(ctx context.Context, ln net.Listener) {
+	e.acceptLoop(ctx, ln, "tunnel", func(conn net.Conn) { go e.serveAgent(conn) })
 }
 
 // handshakeTimeout bounds the TLS handshake on the internet-facing tunnel
@@ -180,17 +201,13 @@ func (e *Edge) serveAgent(conn net.Conn) {
 }
 
 func (e *Edge) acceptIngress(ctx context.Context, ln net.Listener) {
-	for ctx.Err() == nil {
-		conn, err := ln.Accept()
-		if err != nil {
-			return
-		}
+	e.acceptLoop(ctx, ln, "ingress", func(conn net.Conn) {
 		e.drainWG.Add(1)
 		go func() {
 			defer e.drainWG.Done()
 			e.handleIngress(conn)
 		}()
-	}
+	})
 }
 
 func (e *Edge) handleIngress(conn net.Conn) {
