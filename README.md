@@ -651,7 +651,9 @@ bolted on.
 Logging uses `log/slog` in text, JSON, or a journald-friendly `journal` format (see [Log formats](#log-formats)). Each step is a named event, for example `edge.dial`,
 `tunnel.tls_handshake`, `tunnel.established`, `agent.connected`, `ingress.accept`,
 `stream.open`, `stream.closed`, and `reconnect.scheduled`, with timing and the concrete reason
-on failure.
+on failure. The edge stamps its build version into each stream preamble, and the agent logs a
+one-time `version.mismatch` warning if the edge is running a different version, so an
+accidental one-sided upgrade is visible in the logs.
 
 Because every request carries a `conn_id` in its stream preamble, the same id shows up in both
 the edge and agent logs. Running `grep <conn_id>` on either host reconstructs one request's

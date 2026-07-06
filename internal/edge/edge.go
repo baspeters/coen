@@ -290,7 +290,7 @@ func (e *Edge) handleIngress(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
-	if err := tunnel.WritePreamble(stream, tunnel.Preamble{ConnID: connID, ClientAddr: conn.RemoteAddr().String(), Host: host}); err != nil {
+	if err := tunnel.WritePreamble(stream, tunnel.Preamble{ConnID: connID, ClientAddr: conn.RemoteAddr().String(), Host: host, EdgeVersion: e.cfg.Version}); err != nil {
 		log.Warn("stream.preamble_error", "error", err.Error())
 		_ = stream.Close()
 		_ = conn.Close()

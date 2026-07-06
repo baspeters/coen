@@ -13,6 +13,9 @@ type Preamble struct {
 	ConnID     string `json:"conn_id"`
 	ClientAddr string `json:"client_addr"`
 	Host       string `json:"host"`
+	// EdgeVersion is the edge's build version, so the agent can warn on a
+	// version skew. Omitted (and thus empty on an older edge) for compatibility.
+	EdgeVersion string `json:"edge_version,omitempty"`
 }
 
 const maxPreamble = 4096

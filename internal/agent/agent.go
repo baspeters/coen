@@ -21,15 +21,17 @@ import (
 )
 
 type Agent struct {
-	cfg    *config.AgentConfig
-	log    *slog.Logger
-	state  *obs.State
-	tlsCfg *tls.Config
-	routes *route.Matcher[string] // host -> local backend service address
+	cfg     *config.AgentConfig
+	log     *slog.Logger
+	state   *obs.State
+	tlsCfg  *tls.Config
+	routes  *route.Matcher[string] // host -> local backend service address
+	version string                 // build version, for edge/agent skew detection
 
-	mu       sync.Mutex
-	draining bool
-	inflight sync.WaitGroup
+	mu          sync.Mutex
+	draining    bool
+	inflight    sync.WaitGroup
+	versionWarn sync.Once
 }
 
 // drainStreams stops accepting new streams, then waits up to cfg.Drain for
@@ -72,7 +74,7 @@ func New(cfg *config.AgentConfig, log *slog.Logger, state *obs.State) (*Agent, e
 	for _, r := range cfg.Routes {
 		entries = append(entries, route.Entry[string]{Pattern: r.Host, Value: r.Service})
 	}
-	return &Agent{cfg: cfg, log: log, state: state, tlsCfg: tunnel.ClientTLSConfig(pool, cert, host), routes: route.Build(entries)}, nil
+	return &Agent{cfg: cfg, log: log, state: state, tlsCfg: tunnel.ClientTLSConfig(pool, cert, host), routes: route.Build(entries), version: cfg.Version}, nil
 }
 
 func (a *Agent) Run(ctx context.Context) error {
@@ -186,6 +188,13 @@ func (a *Agent) handleStream(stream net.Conn) {
 		return
 	}
 	log := a.log.With("conn_id", p.ConnID, "client_addr", p.ClientAddr, "host", p.Host)
+	if p.EdgeVersion != a.version {
+		// Warn once per process on an edge/agent version skew (an empty
+		// EdgeVersion means the edge predates this field, i.e. an older build).
+		a.versionWarn.Do(func() {
+			log.Warn("version.mismatch", "edge_version", p.EdgeVersion, "agent_version", a.version)
+		})
+	}
 	svcAddr, ok := a.routes.Match(p.Host)
 	if !ok {
 		log.Warn("stream.no_route", "host", p.Host)

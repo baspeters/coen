@@ -76,6 +76,9 @@ type EdgeConfig struct {
 	Drain   Duration           `yaml:"drain_timeout"`
 	Log     LogConfig          `yaml:"log"`
 	Admin   AdminConfig        `yaml:"admin"`
+	// Version is the build version, set programmatically (not from YAML). The
+	// edge stamps it into each stream preamble for agent-side skew detection.
+	Version string `yaml:"-"`
 }
 
 // AllowedFingerprints derives the set of agent fingerprints permitted to connect
@@ -108,4 +111,7 @@ type AgentConfig struct {
 	Drain     Duration        `yaml:"drain_timeout"`
 	Log       LogConfig       `yaml:"log"`
 	Admin     AdminConfig     `yaml:"admin"`
+	// Version is the build version, set programmatically (not from YAML), used
+	// to warn on an edge/agent version skew.
+	Version string `yaml:"-"`
 }

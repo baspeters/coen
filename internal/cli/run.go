@@ -35,6 +35,7 @@ func newEdgeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			cfg.Version = Version
 			log, lv, err := obs.NewLogger(cfg.Log.Level, cfg.Log.Format, os.Stderr)
 			if err != nil {
 				return err
@@ -62,6 +63,7 @@ func newAgentCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			cfg.Version = Version
 			log, lv, err := obs.NewLogger(cfg.Log.Level, cfg.Log.Format, os.Stderr)
 			if err != nil {
 				return err
