@@ -48,12 +48,17 @@ type AgentInfo struct {
 }
 
 func (s *State) SetConnected(fp string) {
-	s.connected.Store(true)
+	// Store the details before flipping connected, so a concurrent Snapshot
+	// never observes connected=true with a not-yet-written since (epoch) or fp.
 	s.connectedNano.Store(time.Now().UnixNano())
 	s.peerFP.Store(fp)
+	s.connected.Store(true)
 }
-func (s *State) SetDisconnected() { s.connected.Store(false) }
-func (s *State) StreamOpened()    { s.activeStreams.Add(1); s.totalStreams.Add(1) }
+func (s *State) SetDisconnected() {
+	s.connected.Store(false)
+	s.peerFP.Store("") // don't report a stale peer fingerprint once disconnected
+}
+func (s *State) StreamOpened() { s.activeStreams.Add(1); s.totalStreams.Add(1) }
 func (s *State) StreamClosed(in, out int64) {
 	s.activeStreams.Add(-1)
 	s.bytesIn.Add(in)

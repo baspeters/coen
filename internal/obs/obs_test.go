@@ -142,6 +142,9 @@ func TestStateHandshakeErrorAndDisconnect(t *testing.T) {
 	if !snap2.ConnectedSince.IsZero() {
 		t.Fatalf("expected zero ConnectedSince once disconnected, got %v", snap2.ConnectedSince)
 	}
+	if snap2.PeerFingerprint != "" {
+		t.Fatalf("peer fingerprint should be cleared after disconnect, got %q", snap2.PeerFingerprint)
+	}
 	// Disconnecting must not clobber counters accumulated before it.
 	if snap2.HandshakeFail != 2 || snap2.HandshakeOK != 1 || snap2.LastError != "boom" {
 		t.Fatalf("SetDisconnected should not reset other counters: %+v", snap2)
