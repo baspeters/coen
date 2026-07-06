@@ -497,7 +497,7 @@ admin:
 | `ingress.listen` | string | required | Public ingress address, `host:port`. `:443` in standalone, `127.0.0.1:8000` behind nginx. |
 | `ingress.tls.cert`, `ingress.tls.key` | path | required in `standalone` | PEM certificate and key for public TLS. Unused in `proxied` mode. |
 | `ingress.max_connections` | int | `0` | Global cap on concurrent ingress connections; over it the edge returns `503`. `0` means unlimited. |
-| `ingress.read_header_timeout` | duration | `10s` | Deadline for reading a request head (slow-loris protection). `0` disables it. |
+| `ingress.read_header_timeout` | duration | `10s` | Deadline for reading a request head (slow-loris protection). Always enforced; `0` or unset falls back to the default and cannot disable it. |
 | `ingress.idle_timeout` | duration | `0` | Rolling idle deadline while streaming: a connection with no bytes in either direction for this long is closed. `0` disables it. See the WebSocket note below. |
 | `tunnel.listen` | string | required | Address of the mTLS tunnel server the agents dial, e.g. `:2636`. |
 | `tunnel.ca` | path | required | CA bundle that an agent's client certificate must chain to. |
@@ -506,7 +506,7 @@ admin:
 | `routes[].host` | string | required | Match pattern: an exact host, a `*.suffix` wildcard, or `*` (default). |
 | `routes[].agent_fingerprint` | string | required | `SHA256:...` fingerprint of the agent that owns this host; `coen cert agent` prints it. The set of these values is the connection allowlist. |
 | `routes[].max_connections` | int | `0` | Per-route cap on concurrent connections; over it the edge returns `503`. `0` means unlimited. |
-| `drain_timeout` | duration | `15s` | On shutdown, finish in-flight streams for up to this long before force-closing. `0` closes immediately. |
+| `drain_timeout` | duration | `15s` | On shutdown, finish in-flight streams for up to this long before force-closing. `0` or unset uses the default (15s). |
 | `log.level` | string | `info` | `trace`, `debug`, `info`, `warn`, or `error`. |
 | `log.format` | string | autodetect | `text`, `json`, or `journal`. Unset autodetects: `journal` under systemd (journald), otherwise `text`. See [Log formats](#log-formats). |
 | `admin.socket` | path | (unset) | Unix socket for `coen status`. When unset, the status socket is disabled. |
@@ -545,7 +545,7 @@ admin:
 | `routes[].service` | string | required | Local backend address (`host:port`) the agent dials for this host. |
 | `reconnect.min_backoff` | duration | `1s` | Initial reconnect backoff. |
 | `reconnect.max_backoff` | duration | `30s` | Maximum reconnect backoff (exponential, with jitter). |
-| `drain_timeout` | duration | `15s` | On shutdown, finish in-flight streams for up to this long. `0` closes immediately. |
+| `drain_timeout` | duration | `15s` | On shutdown, finish in-flight streams for up to this long. `0` or unset uses the default (15s). |
 | `log.level` | string | `info` | `trace`, `debug`, `info`, `warn`, or `error`. |
 | `log.format` | string | autodetect | `text`, `json`, or `journal`. Unset autodetects: `journal` under systemd (journald), otherwise `text`. See [Log formats](#log-formats). |
 | `admin.socket` | path | (unset) | Unix socket for `coen status`. When unset, the status socket is disabled. |
@@ -587,7 +587,7 @@ error rather than a dropped connection. The failure is logged on the agent with 
 
 - `ingress.max_connections` and `routes[].max_connections` cap concurrent connections globally
   and per route; over a cap the edge returns `503` without touching an agent.
-- `ingress.read_header_timeout` (default `10s`, always on unless `0`) bounds how long a client
+- `ingress.read_header_timeout` (default `10s`, always enforced) bounds how long a client
   may take to send its request head.
 - `ingress.idle_timeout` (default off) closes a streaming connection after that long with no
   bytes in either direction. It is off by default because it would drop an idle but healthy
@@ -600,7 +600,7 @@ error rather than a dropped connection. The failure is logged on the agent with 
 
 On `SIGINT` or `SIGTERM`, the edge stops accepting new ingress connections and the agent stops
 accepting new streams; both then wait up to `drain_timeout` for in-flight streams to finish
-before force-closing and exiting. A `drain_timeout` of `0` closes everything immediately.
+before force-closing and exiting. An unset or `0` `drain_timeout` uses the default (15s).
 
 See [`examples/`](examples/) for an example configuration of each variant.
 

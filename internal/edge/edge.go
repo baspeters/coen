@@ -154,6 +154,19 @@ func (e *Edge) acceptTunnel(ctx context.Context, ln net.Listener) {
 // listener so an unauthenticated peer cannot pin a goroutine/fd indefinitely.
 const handshakeTimeout = 10 * time.Second
 
+// defaultReadHeaderTimeout is the read/handshake deadline applied to public
+// ingress connections when the configured value is non-positive. The deadline
+// is always enforced, so slow-loris protection on the public listener cannot be
+// switched off by configuration.
+const defaultReadHeaderTimeout = 10 * time.Second
+
+func readHeaderDeadline(configured time.Duration) time.Duration {
+	if configured <= 0 {
+		return defaultReadHeaderTimeout
+	}
+	return configured
+}
+
 func (e *Edge) serveAgent(conn net.Conn) {
 	tlsConn, ok := conn.(*tls.Conn)
 	if !ok {
@@ -222,9 +235,10 @@ func (e *Edge) handleIngress(conn net.Conn) {
 	}
 	defer e.sem.release()
 
-	if to := e.cfg.Ingress.ReadHeaderTimeout.Duration(); to > 0 {
-		_ = conn.SetReadDeadline(time.Now().Add(to))
-	}
+	// The public listener always gets a read/handshake deadline (slow-loris
+	// protection); a non-positive config value falls back to the default rather
+	// than disabling it.
+	_ = conn.SetReadDeadline(time.Now().Add(readHeaderDeadline(e.cfg.Ingress.ReadHeaderTimeout.Duration())))
 	head, host, err := readRequestHead(conn, maxHeaderBytes)
 	if err != nil {
 		log.Warn("ingress.bad_request", "error", err.Error())
