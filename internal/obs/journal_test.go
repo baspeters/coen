@@ -129,6 +129,45 @@ func TestNewLoggerJournalFormat(t *testing.T) {
 	}
 }
 
+func TestJournalWithGroup(t *testing.T) {
+	log, buf := newTestJournal(t)
+	log.WithGroup("outer").Info("e.vent",
+		"k", "v",
+		slog.Group("g", slog.Int("n", 1)),
+	)
+	want := "<6>e vent, outer.k=v, outer.g.n=1\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+func TestJournalNestedGroups(t *testing.T) {
+	log, buf := newTestJournal(t)
+	log.WithGroup("a").WithGroup("b").Info("m", "k", 1)
+	if got := buf.String(); got != "<6>m, a.b.k=1\n" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestJournalWithEmptyAttrsAndGroupReturnSameHandler(t *testing.T) {
+	var buf bytes.Buffer
+	h := newJournalHandler(&buf, new(slog.LevelVar))
+	if h.WithAttrs(nil) != h {
+		t.Fatal("WithAttrs(nil) should return the same handler")
+	}
+	if h.WithGroup("") != h {
+		t.Fatal(`WithGroup("") should return the same handler`)
+	}
+}
+
+func TestJournalAppendAttrSkipsZeroAttr(t *testing.T) {
+	var b strings.Builder
+	appendAttr(&b, "", slog.Attr{})
+	if b.String() != "" {
+		t.Fatalf("zero attr should produce nothing, got %q", b.String())
+	}
+}
+
 func TestParseJournalStream(t *testing.T) {
 	if d, i, ok := parseJournalStream("12:34"); !ok || d != 12 || i != 34 {
 		t.Fatalf("parse 12:34 = %d,%d,%v", d, i, ok)
