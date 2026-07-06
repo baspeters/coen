@@ -22,12 +22,12 @@ func findResult(rs []Result, name string) (Result, bool) {
 }
 
 func TestCheckBind(t *testing.T) {
-	if r := checkBind("bind", "127.0.0.1:0"); !r.OK {
+	if r := checkBind("bind", "127.0.0.1:0", ""); !r.OK {
 		t.Fatalf("expected ok, got %+v", r)
 	}
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
 	defer ln.Close()
-	if r := checkBind("bind", ln.Addr().String()); r.OK {
+	if r := checkBind("bind", ln.Addr().String(), ""); r.OK {
 		t.Fatal("expected fail on in-use port")
 	}
 }

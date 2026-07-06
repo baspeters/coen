@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/baspeters/coen/internal/admin"
 	"github.com/baspeters/coen/internal/config"
 	"github.com/baspeters/coen/internal/pki"
 	"github.com/baspeters/coen/internal/tunnel"
@@ -31,13 +32,21 @@ func checkFile(name, path string) Result {
 	return ok(name, path)
 }
 
-func checkBind(name, addr string) Result {
+func checkBind(name, addr, adminSocket string) Result {
 	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return fail(name, err.Error(), "another process may hold the port, or you lack permission to bind it (:443 needs CAP_NET_BIND_SERVICE)")
+	if err == nil {
+		_ = ln.Close()
+		return ok(name, addr)
 	}
-	_ = ln.Close()
-	return ok(name, addr)
+	// Could not bind. If a coen daemon is answering on the admin socket, the
+	// port is almost certainly held by that running daemon (the normal case
+	// when debugging a live host), not a genuine conflict.
+	if adminSocket != "" {
+		if _, sErr := admin.Status(adminSocket); sErr == nil {
+			return ok(name, addr+" (in use by the running coen daemon)")
+		}
+	}
+	return fail(name, err.Error(), "another process may hold the port, or you lack permission to bind it (:443 needs CAP_NET_BIND_SERVICE)")
 }
 
 // CheckAgent runs preflight checks for the agent role.
@@ -46,6 +55,14 @@ func CheckAgent(cfg *config.AgentConfig) []Result {
 	out = append(out, checkFile("pki: ca", cfg.Edge.CA))
 	out = append(out, checkFile("pki: client cert", cfg.Edge.Cert))
 	out = append(out, checkFile("pki: client key", cfg.Edge.Key))
+
+	if pin := cfg.Edge.EdgeFingerprint; pin != "" {
+		if err := pki.ValidateFingerprint(pin); err != nil {
+			out = append(out, fail("config: edge_fingerprint", err.Error(), "edge_fingerprint must be a SHA256:... value, or empty to disable pinning"))
+		} else {
+			out = append(out, ok("config: edge_fingerprint", "well-formed"))
+		}
+	}
 
 	caPEM, err := os.ReadFile(cfg.Edge.CA)
 	if err != nil {
@@ -87,7 +104,7 @@ func CheckAgent(cfg *config.AgentConfig) []Result {
 	} else {
 		leaf := tconn.ConnectionState().PeerCertificates[0]
 		edgeFP := pki.Fingerprint(leaf)
-		out = append(out, ok("mtls: handshake", "TLS ok, edge fingerprint "+edgeFP))
+		out = append(out, ok("mtls: handshake", "transport TLS ok, edge fingerprint "+edgeFP+" (route authorization is enforced by the edge, not verified here)"))
 		if pin := cfg.Edge.EdgeFingerprint; pin != "" && pin != edgeFP {
 			out = append(out, fail("mtls: pin", fmt.Sprintf("got %s want %s", edgeFP, pin), "update edge_fingerprint or the edge certificate"))
 		}
@@ -141,7 +158,15 @@ func CheckEdge(cfg *config.EdgeConfig) []Result {
 		}
 	}
 
-	out = append(out, checkBind("bind: tunnel", cfg.Tunnel.Listen))
-	out = append(out, checkBind("bind: ingress", cfg.Ingress.Listen))
+	for _, r := range cfg.Routes {
+		if err := pki.ValidateFingerprint(r.AgentFingerprint); err != nil {
+			out = append(out, fail("config: fingerprint "+r.Host, err.Error(), "agent_fingerprint must be the SHA256:... value printed by `coen cert agent`"))
+		} else {
+			out = append(out, ok("config: fingerprint "+r.Host, "well-formed"))
+		}
+	}
+
+	out = append(out, checkBind("bind: tunnel", cfg.Tunnel.Listen, cfg.Admin.Socket))
+	out = append(out, checkBind("bind: ingress", cfg.Ingress.Listen, cfg.Admin.Socket))
 	return out
 }

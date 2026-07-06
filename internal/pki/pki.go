@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -159,6 +160,24 @@ func (ca *CA) IssueClient(name string) ([]byte, []byte, error) {
 func Fingerprint(cert *x509.Certificate) string {
 	sum := sha256.Sum256(cert.Raw)
 	return "SHA256:" + base64.StdEncoding.EncodeToString(sum[:])
+}
+
+// ValidateFingerprint checks that s is a well-formed certificate fingerprint:
+// the "SHA256:" prefix followed by base64 of exactly 32 bytes, matching the
+// form Fingerprint produces.
+func ValidateFingerprint(s string) error {
+	const prefix = "SHA256:"
+	if !strings.HasPrefix(s, prefix) {
+		return fmt.Errorf("fingerprint must start with %q", prefix)
+	}
+	raw, err := base64.StdEncoding.DecodeString(s[len(prefix):])
+	if err != nil {
+		return fmt.Errorf("fingerprint is not valid base64: %w", err)
+	}
+	if len(raw) != sha256.Size {
+		return fmt.Errorf("fingerprint decodes to %d bytes, want %d", len(raw), sha256.Size)
+	}
+	return nil
 }
 
 // FingerprintPEM parses a PEM certificate and returns its fingerprint.

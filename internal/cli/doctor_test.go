@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -59,8 +60,8 @@ tunnel:
   key: %s
 routes:
   - host: "*"
-    agent_fingerprint: "AA"
-`, caPath, certPath, keyPath)
+    agent_fingerprint: "%s"
+`, caPath, certPath, keyPath, "SHA256:"+base64.StdEncoding.EncodeToString(make([]byte, 32)))
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
