@@ -263,6 +263,15 @@ func (e *Edge) handleIngress(conn net.Conn) {
 	stream, err := session.OpenStream()
 	if err != nil {
 		log.Warn("stream.open_error", "error", err.Error())
+		// The session is dead (a silent partition the tunnel keepalive has not
+		// detected yet). Evict it so a reconnecting agent can register at once
+		// instead of being refused while every request 502s until keepalive
+		// fires. remove is session-guarded, so a concurrent reconnect is safe.
+		if e.reg.remove(rs.fingerprint, session) {
+			e.state.AgentDisconnected(rs.fingerprint)
+			e.log.Info("agent.disconnected", "peer_fp", rs.fingerprint)
+		}
+		_ = session.Close()
 		errpage.Write(conn, 502, "Bad Gateway", "No agent connected", connID)
 		_ = conn.Close()
 		return
