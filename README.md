@@ -419,8 +419,8 @@ timeouts, fingerprints) are read at startup and take effect only when the proces
 - **One file per role.** The edge reads `edge.yaml`, the agent reads `agent.yaml`. The
   defaults are `/etc/coen/edge.yaml` and `/etc/coen/agent.yaml`; override either with
   `--config <path>`.
-- **Format.** YAML (`gopkg.in/yaml.v3`). Unknown keys in the base file are ignored; unknown
-  keys in a drop-in file are rejected (see below).
+- **Format.** YAML (`gopkg.in/yaml.v3`). Unknown keys are rejected in both the base file and
+  drop-in files, so a misspelled field fails at startup instead of being silently ignored.
 - **Durations** are Go duration strings: `500ms`, `10s`, `2m`, `1h`. Every field whose name
   ends in `_timeout` or `_backoff` takes one.
 - **Validation at startup.** The daemon refuses to start on an invalid config and prints the

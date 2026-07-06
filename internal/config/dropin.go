@@ -98,14 +98,23 @@ func dropInLabel(base, full string) string {
 	return filepath.Join(filepath.Base(dropInDir(base)), filepath.Base(full))
 }
 
+// strictDecode unmarshals YAML into out, rejecting unknown keys so a mistyped
+// field fails loudly rather than being silently dropped.
+func strictDecode(b []byte, out any) error {
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	dec.KnownFields(true)
+	if err := dec.Decode(out); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	return nil
+}
+
 func strictDecodeFile(path string, out any) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
-	dec := yaml.NewDecoder(bytes.NewReader(b))
-	dec.KnownFields(true)
-	if err := dec.Decode(out); err != nil && !errors.Is(err, io.EOF) {
+	if err := strictDecode(b, out); err != nil {
 		return fmt.Errorf("parse %s: %w", path, err)
 	}
 	return nil

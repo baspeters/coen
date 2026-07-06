@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/baspeters/coen/internal/route"
-	"gopkg.in/yaml.v3"
 )
 
 func LoadEdge(path string) (*EdgeConfig, error) {
@@ -16,7 +15,7 @@ func LoadEdge(path string) (*EdgeConfig, error) {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 	var c EdgeConfig
-	if err := yaml.Unmarshal(b, &c); err != nil {
+	if err := strictDecode(b, &c); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
@@ -94,7 +93,7 @@ func LoadAgent(path string) (*AgentConfig, error) {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 	var c AgentConfig
-	if err := yaml.Unmarshal(b, &c); err != nil {
+	if err := strictDecode(b, &c); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
