@@ -80,7 +80,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	max := a.cfg.Reconnect.MaxBackoff.Duration()
 	backoff := min
 	for ctx.Err() == nil {
-		established, err := a.connectOnce(ctx)
+		stable, err := a.connectOnce(ctx)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -89,7 +89,10 @@ func (a *Agent) Run(ctx context.Context) error {
 			a.log.Warn("tunnel.closed", "reason", err.Error())
 			a.state.SetError(err.Error())
 		}
-		if established {
+		// Reset the backoff only when the tunnel actually stayed up long enough
+		// to be a real session (see connectOnce); an immediately-rejected
+		// handshake keeps backing off rather than reconnecting ~1/s.
+		if stable {
 			backoff = min
 		}
 		wait := withJitter(backoff)
@@ -107,7 +110,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	return nil
 }
 
-func (a *Agent) connectOnce(ctx context.Context) (established bool, err error) {
+func (a *Agent) connectOnce(ctx context.Context) (stable bool, err error) {
 	a.log.Info("edge.dial", "address", a.cfg.Edge.Address)
 	d := &net.Dialer{Timeout: 10 * time.Second}
 	raw, err := d.DialContext(ctx, "tcp", a.cfg.Edge.Address)
@@ -130,11 +133,17 @@ func (a *Agent) connectOnce(ctx context.Context) (established bool, err error) {
 	a.state.HandshakeOK()
 	a.state.SetConnected(fp)
 	a.log.Info("tunnel.established", "peer_fp", fp, "tls", tlsVersion(conn.ConnectionState().Version))
+	// A session is "stable" (worth resetting the reconnect backoff for) only if
+	// it lives at least min_backoff. A handshake the edge accepts then rejects
+	// (unauthorized or duplicate fingerprint) returns below in well under that,
+	// so it keeps backing off instead of storming ~1/s.
+	connectedAt := time.Now()
+	minBackoff := a.cfg.Reconnect.MinBackoff.Duration()
 
 	session, err := tunnel.ClientSession(conn)
 	if err != nil {
 		_ = conn.Close()
-		return true, fmt.Errorf("yamux client: %w", err)
+		return time.Since(connectedAt) >= minBackoff, fmt.Errorf("yamux client: %w", err)
 	}
 	defer session.Close()
 	// On cancellation, drain in-flight streams (bounded) then close the session
@@ -152,7 +161,7 @@ func (a *Agent) connectOnce(ctx context.Context) (established bool, err error) {
 	for {
 		stream, err := session.AcceptStream()
 		if err != nil {
-			return true, fmt.Errorf("accept stream: %w", err)
+			return time.Since(connectedAt) >= minBackoff, fmt.Errorf("accept stream: %w", err)
 		}
 		a.mu.Lock()
 		if a.draining {
