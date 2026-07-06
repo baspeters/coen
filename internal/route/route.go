@@ -71,9 +71,12 @@ func Build[V any](entries []Entry[V]) *Matcher[V] {
 		case e.Pattern == "*":
 			m.def, m.hasDef = e.Value, true
 		case strings.HasPrefix(e.Pattern, "*."):
-			m.wildcard = append(m.wildcard, wildcard[V]{suffix: strings.ToLower(e.Pattern[2:]), val: e.Value})
+			// Normalize (not just lowercase) so the stored suffix matches the
+			// same canonicalization Match applies to the incoming host; a
+			// pattern with a trailing dot or port would otherwise never match.
+			m.wildcard = append(m.wildcard, wildcard[V]{suffix: Normalize(e.Pattern[2:]), val: e.Value})
 		default:
-			m.exact[strings.ToLower(e.Pattern)] = e.Value
+			m.exact[Normalize(e.Pattern)] = e.Value
 		}
 	}
 	sort.SliceStable(m.wildcard, func(i, j int) bool {
