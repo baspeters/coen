@@ -40,17 +40,7 @@ func (a *Agent) drainStreams() {
 	a.mu.Lock()
 	a.draining = true
 	a.mu.Unlock()
-	timeout := a.cfg.Drain.Duration()
-	if timeout <= 0 {
-		return
-	}
-	done := make(chan struct{})
-	go func() { a.inflight.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(timeout):
-		a.log.Warn("drain.timeout", "after", timeout.String())
-	}
+	obs.DrainWait(a.log, &a.inflight, a.cfg.Drain.Duration())
 }
 
 func New(cfg *config.AgentConfig, log *slog.Logger, state *obs.State) (*Agent, error) {

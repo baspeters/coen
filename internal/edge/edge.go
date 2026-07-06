@@ -106,17 +106,7 @@ func (e *Edge) Serve(ctx context.Context, tunLn, ingressLn net.Listener) error {
 
 // drain waits up to cfg.Drain for in-flight ingress handlers to finish.
 func (e *Edge) drain() {
-	timeout := e.cfg.Drain.Duration()
-	if timeout <= 0 {
-		return
-	}
-	done := make(chan struct{})
-	go func() { e.drainWG.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(timeout):
-		e.log.Warn("drain.timeout", "after", timeout.String())
-	}
+	obs.DrainWait(e.log, &e.drainWG, e.cfg.Drain.Duration())
 }
 
 // acceptRetryDelay bounds how long an accept loop pauses after a transient
