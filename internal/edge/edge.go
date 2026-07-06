@@ -3,7 +3,9 @@ package edge
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"sync"
@@ -135,6 +137,13 @@ func (e *Edge) acceptTunnel(ctx context.Context, ln net.Listener) {
 // listener so an unauthenticated peer cannot pin a goroutine/fd indefinitely.
 const handshakeTimeout = 10 * time.Second
 
+// isBenignHandshakeClose reports whether a tunnel TLS handshake error is just a
+// connection that went away before negotiating (a probe, health check, or
+// scanner), rather than a genuine handshake rejection worth flagging.
+func isBenignHandshakeClose(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed)
+}
+
 // defaultReadHeaderTimeout is the read/handshake deadline applied to public
 // ingress connections when the configured value is non-positive. The deadline
 // is always enforced, so slow-loris protection on the public listener cannot be
@@ -156,8 +165,15 @@ func (e *Edge) serveAgent(conn net.Conn) {
 	}
 	_ = tlsConn.SetDeadline(time.Now().Add(handshakeTimeout))
 	if err := tlsConn.Handshake(); err != nil {
-		e.state.HandshakeFail()
-		e.log.Warn("agent.tls_handshake", "verify_result", "fail", "error", err.Error())
+		if isBenignHandshakeClose(err) {
+			// The peer went away before completing the TLS handshake: a health
+			// check, load-balancer probe, port scan, or doctor's reachability
+			// probe. Not a real failure, so don't count it or warn.
+			e.log.Debug("agent.tls_handshake", "verify_result", "incomplete", "error", err.Error())
+		} else {
+			e.state.HandshakeFail()
+			e.log.Warn("agent.tls_handshake", "verify_result", "fail", "error", err.Error())
+		}
 		_ = conn.Close()
 		return
 	}
@@ -174,16 +190,15 @@ func (e *Edge) serveAgent(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
-	e.state.HandshakeOK()
 	if !e.reg.register(fp, session) {
 		// A live agent already owns this fingerprint. Keep it and drop this
-		// connection so a probe (e.g. `coen doctor`) or a duplicate cert cannot
-		// disrupt a serving agent. The handshake already succeeded, so a
-		// doctor probe still reports success.
+		// connection so a duplicate cert (or a stray reconnect) cannot disrupt a
+		// serving agent. This is not counted as a successful handshake.
 		e.log.Warn("agent.duplicate_fingerprint", "peer_fp", fp)
 		_ = session.Close()
 		return
 	}
+	e.state.HandshakeOK() // count only a fully accepted agent, not a refused duplicate
 	e.state.AgentConnected(fp, tlsConn.RemoteAddr().String())
 	e.log.Info("agent.connected", "peer_fp", fp, "remote_addr", tlsConn.RemoteAddr().String())
 
