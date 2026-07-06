@@ -4,7 +4,9 @@ import (
 	"embed"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
+	"runtime"
 	"text/template"
 
 	"github.com/spf13/cobra"
@@ -12,6 +14,13 @@ import (
 
 //go:embed assets/*.service assets/*.yaml
 var assets embed.FS
+
+// Seams for testing; overridden in tests to exercise every OS and user state.
+var (
+	osGOOS      = runtime.GOOS
+	lookupUser  = user.Lookup
+	lookupGroup = user.LookupGroup
+)
 
 func init() { register(newInstallCmd) }
 
@@ -69,6 +78,9 @@ func newInstallCmd() *cobra.Command {
 					return err
 				}
 			}
+			if osGOOS == "linux" {
+				checkServiceUser(cmd)
+			}
 			fmt.Fprintf(cmd.OutOrStdout(), "installed %s\nexample config: %s\nnext: edit the config, then run:\n  sudo systemctl enable --now coen-%s\n", unitPath, configPath, role)
 			return nil
 		},
@@ -77,4 +89,19 @@ func newInstallCmd() *cobra.Command {
 	cmd.Flags().StringVar(&configDir, "config-dir", "/etc/coen", "config directory")
 	cmd.Flags().StringVar(&bin, "bin", "/usr/local/bin/coen", "path to the coen binary")
 	return cmd
+}
+
+// checkServiceUser advises (non-fatally) when the systemd unit's User=coen is
+// not present. It is Linux-only; the launchd path runs as root.
+func checkServiceUser(cmd *cobra.Command) {
+	_, uerr := lookupUser("coen")
+	_, gerr := lookupGroup("coen")
+	if uerr == nil && gerr == nil {
+		return
+	}
+	fmt.Fprint(cmd.ErrOrStderr(),
+		"warning: the unit runs as user 'coen', which was not found. Create it with:\n"+
+			"  sudo groupadd --system coen\n"+
+			"  sudo useradd  --system --gid coen --no-create-home --shell /usr/sbin/nologin coen\n"+
+			"(the .deb/.rpm/.apk packages create this user automatically.)\n")
 }

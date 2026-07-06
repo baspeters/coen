@@ -680,6 +680,11 @@ sudo systemctl enable --now coen-edge      # on the public host
 sudo systemctl enable --now coen-agent     # on the private host
 ```
 
+The systemd unit runs as a dedicated non-root `coen` user. `coen install` does
+not create it (that would mutate system accounts); if it is missing, install
+prints the exact `groupadd`/`useradd` commands to create it. The `.deb`, `.rpm`,
+and `.apk` packages create the user for you.
+
 ## Roadmap
 
 Delivered:
