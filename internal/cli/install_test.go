@@ -212,3 +212,69 @@ func TestInstallSilentWhenServiceUserPresent(t *testing.T) {
 		t.Fatalf("advisory should be absent when the user exists, got:\n%s", out)
 	}
 }
+
+func TestInstallDarwinWritesPlist(t *testing.T) {
+	pinGOOS(t, "darwin")
+	unitDir, configDir := t.TempDir(), t.TempDir()
+	if _, err := runCLI(t, "install", "agent", "--unit-dir", unitDir, "--config-dir", configDir, "--bin", "/usr/local/bin/coen"); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	plist, err := os.ReadFile(filepath.Join(unitDir, "com.coen.agent.plist"))
+	if err != nil {
+		t.Fatalf("read plist: %v", err)
+	}
+	s := string(plist)
+	for _, want := range []string{"<string>com.coen.agent</string>", "<string>/usr/local/bin/coen</string>", "<key>KeepAlive</key>", filepath.Join(configDir, "agent.yaml")} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("plist missing %q:\n%s", want, s)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(configDir, "agent.yaml")); err != nil {
+		t.Fatalf("example config not written: %v", err)
+	}
+}
+
+func TestInstallUnsupportedOS(t *testing.T) {
+	pinGOOS(t, "freebsd")
+	// No --unit-dir, so this also exercises the default-unit-dir resolution;
+	// renderService errors before anything touches the filesystem.
+	out, err := runCLI(t, "install", "edge")
+	if err == nil {
+		t.Fatal("expected an error on an unsupported OS")
+	}
+	if !strings.Contains(err.Error()+out, "not available on freebsd") {
+		t.Fatalf("expected an unsupported-OS message, got %q / %q", err, out)
+	}
+}
+
+func TestDefaultUnitDir(t *testing.T) {
+	if got := defaultUnitDir("darwin"); got != "/Library/LaunchDaemons" {
+		t.Fatalf("darwin: %q", got)
+	}
+	if got := defaultUnitDir("linux"); got != "/etc/systemd/system" {
+		t.Fatalf("linux: %q", got)
+	}
+	if got := defaultUnitDir("freebsd"); got != "/etc/systemd/system" {
+		t.Fatalf("default: %q", got)
+	}
+}
+
+func TestRenderTemplateParseError(t *testing.T) {
+	if _, err := renderTemplate([]byte("{{ .Unclosed "), nil); err == nil {
+		t.Fatal("expected a parse error for a malformed template")
+	}
+}
+
+func TestRenderServicePureFunction(t *testing.T) {
+	fn, content, err := renderService("linux", "edge", "/usr/local/bin/coen", "/etc/coen/edge.yaml")
+	if err != nil || fn != "coen-edge.service" || !strings.Contains(content, "User=coen") {
+		t.Fatalf("linux render: fn=%q err=%v", fn, err)
+	}
+	fn, content, err = renderService("darwin", "edge", "/usr/local/bin/coen", "/etc/coen/edge.yaml")
+	if err != nil || fn != "com.coen.edge.plist" || !strings.Contains(content, "<key>ProgramArguments</key>") {
+		t.Fatalf("darwin render: fn=%q err=%v", fn, err)
+	}
+	if _, _, err := renderService("plan9", "edge", "/x", "/y"); err == nil {
+		t.Fatal("expected error for unsupported goos")
+	}
+}

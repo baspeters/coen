@@ -86,7 +86,7 @@ file, and no third party in the data path.
   a single request together across both processes, a `coen doctor` preflight, and a live
   `coen status` socket.
 - Simple to operate. One binary with subcommands, YAML config, and a `coen install` that
-  writes hardened systemd units.
+  writes a hardened systemd unit on Linux or a launchd job on macOS.
 - Small footprint. Pure Go with three third-party dependencies (`cobra`, `yamux`, `yaml.v3`);
   everything else is the standard library.
 
@@ -183,7 +183,9 @@ flowchart TB
 
 ## Installation
 
-Coen is a single static binary. The daemons target Linux (systemd); the CLI and the
+Coen is a single static binary. The daemons target Linux (systemd); `coen install` also
+generates a launchd job on macOS, and on other systems it prints how to run coen under that
+platform's service manager. The CLI and the
 `coen cert` tooling run anywhere Go does.
 
 ### From a release (prebuilt binary)
@@ -383,7 +385,7 @@ Everything lives under one binary, invoked as `coen <command>`.
 | `coen cert agent` | Issue an agent (client) certificate. |
 | `coen doctor` | Role-aware preflight checks with pass/fail results and remediation hints. |
 | `coen status` | Live snapshot from a running daemon over its admin socket. |
-| `coen install` | Write a hardened systemd unit and an example config for a role. |
+| `coen install` | Write a service definition (systemd unit on Linux, launchd plist on macOS) and an example config for a role. |
 | `coen version` | Print the version. |
 
 Flags and examples:
@@ -684,6 +686,12 @@ The systemd unit runs as a dedicated non-root `coen` user. `coen install` does
 not create it (that would mutate system accounts); if it is missing, install
 prints the exact `groupadd`/`useradd` commands to create it. The `.deb`, `.rpm`,
 and `.apk` packages create the user for you.
+
+On macOS, `coen install` writes a launchd `LaunchDaemon` to
+`/Library/LaunchDaemons/com.coen.<role>.plist` (load it with
+`sudo launchctl bootstrap system /Library/LaunchDaemons/com.coen.<role>.plist`).
+On systems other than Linux and macOS, `coen install` is unavailable and prints
+how to run `coen <role>` under that platform's own service manager.
 
 ## Roadmap
 
