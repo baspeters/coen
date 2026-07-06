@@ -89,6 +89,9 @@ func LoadCA(certPEM, keyPEM []byte) (*CA, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ca cert: %w", err)
 	}
+	if !cert.IsCA {
+		return nil, fmt.Errorf("ca cert is not a CA certificate (IsCA=false); did you point at a leaf cert?")
+	}
 	block, _ := pem.Decode(keyPEM)
 	if block == nil {
 		return nil, fmt.Errorf("no PEM key found")

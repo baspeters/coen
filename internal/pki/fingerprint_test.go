@@ -25,3 +25,17 @@ func TestValidateFingerprint(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadCARejectsNonCACert(t *testing.T) {
+	ca, err := CreateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafCert, leafKey, err := ca.IssueServer("127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadCA(leafCert, leafKey); err == nil {
+		t.Fatal("expected LoadCA to reject a non-CA (leaf) certificate")
+	}
+}
