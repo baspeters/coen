@@ -20,6 +20,6 @@ routes:
 drain_timeout: 15s          # finish in-flight streams up to this long on shutdown
 log:
   level: info
-  format: text
+  # format:                 # unset autodetects: journal under systemd, text in a terminal. Override: text|json|journal
 admin:
   socket: /run/coen/edge.sock

@@ -446,6 +446,20 @@ timeouts, fingerprints) are read at startup and take effect only when the proces
       team-b.yaml      #   routes: [ { host: api.example.com, agent_fingerprint: "..." } ]
   ```
 
+### Log formats
+
+- `text` (logfmt) and `json` are machine-readable and self-contained (each line
+  carries its own timestamp and level).
+- `journal` is for systemd/journald: it omits the timestamp (journald adds one),
+  encodes the level as a syslog priority so `journalctl -p` filters work, and
+  renders each event as a short phrase followed by comma-separated fields, for
+  example `stream closed, conn_id=..., host=tweake.rs, bytes_in=355`. In this
+  format the dotted event ids (`stream.closed`) render as words (`stream closed`);
+  `text` and `json` keep the dotted id.
+- When `log.format` is unset, coen autodetects: `journal` when its output is
+  connected to the journal, otherwise `text`. Set the value explicitly to force
+  one (for example `text` to debug a service in a terminal).
+
 ### Edge configuration (`edge.yaml`)
 
 ```yaml
@@ -470,7 +484,7 @@ routes:                     # host -> owning agent (by client-cert fingerprint)
 drain_timeout: 15s          # finish in-flight streams up to this long on shutdown
 log:
   level: info               # trace, debug, info, warn, or error
-  format: text              # text or json
+  # format:                 # unset autodetects (journal under systemd, text otherwise); text|json|journal
 admin:
   socket: /run/coen/edge.sock
 ```
@@ -492,7 +506,7 @@ admin:
 | `routes[].max_connections` | int | `0` | Per-route cap on concurrent connections; over it the edge returns `503`. `0` means unlimited. |
 | `drain_timeout` | duration | `15s` | On shutdown, finish in-flight streams for up to this long before force-closing. `0` closes immediately. |
 | `log.level` | string | `info` | `trace`, `debug`, `info`, `warn`, or `error`. |
-| `log.format` | string | `text` | `text` or `json`. |
+| `log.format` | string | autodetect | `text`, `json`, or `journal`. Unset autodetects: `journal` under systemd (journald), otherwise `text`. See [Log formats](#log-formats). |
 | `admin.socket` | path | (unset) | Unix socket for `coen status`. When unset, the status socket is disabled. |
 
 ### Agent configuration (`agent.yaml`)
@@ -513,7 +527,7 @@ reconnect:
 drain_timeout: 15s          # finish in-flight streams up to this long on shutdown
 log:
   level: info
-  format: text
+  # format:                 # unset autodetects (journal under systemd, text otherwise); text|json|journal
 admin:
   socket: /run/coen/agent.sock
 ```
@@ -531,7 +545,7 @@ admin:
 | `reconnect.max_backoff` | duration | `30s` | Maximum reconnect backoff (exponential, with jitter). |
 | `drain_timeout` | duration | `15s` | On shutdown, finish in-flight streams for up to this long. `0` closes immediately. |
 | `log.level` | string | `info` | `trace`, `debug`, `info`, `warn`, or `error`. |
-| `log.format` | string | `text` | `text` or `json`. |
+| `log.format` | string | autodetect | `text`, `json`, or `journal`. Unset autodetects: `journal` under systemd (journald), otherwise `text`. See [Log formats](#log-formats). |
 | `admin.socket` | path | (unset) | Unix socket for `coen status`. When unset, the status socket is disabled. |
 
 Host patterns appear on both ends: the edge authorizes which agent owns a host, and the agent
@@ -632,7 +646,7 @@ sources.
 A two-sided tunnel is awkward to debug, so observability is built into the core rather than
 bolted on.
 
-Logging uses `log/slog` in text or JSON. Each step is a named event, for example `edge.dial`,
+Logging uses `log/slog` in text, JSON, or a journald-friendly `journal` format (see [Log formats](#log-formats)). Each step is a named event, for example `edge.dial`,
 `tunnel.tls_handshake`, `tunnel.established`, `agent.connected`, `ingress.accept`,
 `stream.open`, `stream.closed`, and `reconnect.scheduled`, with timing and the concrete reason
 on failure.

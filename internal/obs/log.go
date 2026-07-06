@@ -35,15 +35,34 @@ func NewLogger(level, format string, w io.Writer) (*slog.Logger, *slog.LevelVar,
 	}
 	lv := new(slog.LevelVar)
 	lv.Set(lvl)
+
 	opts := &slog.HandlerOptions{Level: lv}
 	var h slog.Handler
-	switch strings.ToLower(format) {
+	switch resolveFormat(format, w) {
 	case "json":
 		h = slog.NewJSONHandler(w, opts)
-	case "text", "":
+	case "text":
 		h = slog.NewTextHandler(w, opts)
+	case "journal":
+		h = newJournalHandler(w, lv)
 	default:
 		return nil, nil, fmt.Errorf("unknown log format %q", format)
 	}
 	return slog.New(h), lv, nil
+}
+
+// resolveFormat maps the configured format to a concrete handler name. An empty
+// format autodetects: journal when coen is writing to journald, otherwise text.
+func resolveFormat(format string, w io.Writer) string {
+	switch strings.ToLower(format) {
+	case "text", "json", "journal":
+		return strings.ToLower(format)
+	case "":
+		if writerIsJournalStream(w) {
+			return "journal"
+		}
+		return "text"
+	default:
+		return format
+	}
 }
