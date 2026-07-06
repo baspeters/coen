@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"fmt"
+	"io"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -30,9 +32,17 @@ func newRootCmd() *cobra.Command {
 	return root
 }
 
-// Execute runs the coen CLI.
+// Execute runs the coen CLI and exits non-zero on error.
 func Execute() {
-	if err := newRootCmd().Execute(); err != nil {
-		os.Exit(1)
+	os.Exit(run(newRootCmd(), os.Stderr))
+}
+
+// run executes root, printing any error to errw, and returns the process exit
+// code. Kept separate from Execute (which calls os.Exit) so it is testable.
+func run(root *cobra.Command, errw io.Writer) int {
+	if err := root.Execute(); err != nil {
+		fmt.Fprintln(errw, "error:", err)
+		return 1
 	}
+	return 0
 }
