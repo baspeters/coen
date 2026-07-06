@@ -19,17 +19,11 @@ func LoadEdge(path string) (*EdgeConfig, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
-	origins := make([]string, len(c.Routes))
-	base := filepath.Base(path)
-	for i := range origins {
-		origins[i] = base
-	}
-	extra, extraOrigins, err := readEdgeDropIns(path)
+	routes, origins, err := loadRoutes(path, c.Routes)
 	if err != nil {
 		return nil, err
 	}
-	c.Routes = append(c.Routes, extra...)
-	origins = append(origins, extraOrigins...)
+	c.Routes = routes
 
 	if c.Ingress.ReadHeaderTimeout == 0 {
 		c.Ingress.ReadHeaderTimeout = Duration(10 * time.Second)
@@ -41,14 +35,34 @@ func LoadEdge(path string) (*EdgeConfig, error) {
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
-	hosts := make([]sourced, len(c.Routes))
-	for i, r := range c.Routes {
-		hosts[i] = sourced{host: r.Host, origin: origins[i]}
-	}
-	if err := checkDuplicateHosts(hosts); err != nil {
+	if err := checkRouteHosts(c.Routes, origins, func(r EdgeRoute) string { return r.Host }); err != nil {
 		return nil, err
 	}
 	return &c, nil
+}
+
+// loadRoutes returns the base routes plus any drop-in routes, with a parallel
+// list of origin labels used for duplicate-host error messages.
+func loadRoutes[R any](path string, base []R) ([]R, []string, error) {
+	origins := make([]string, len(base))
+	label := filepath.Base(path)
+	for i := range origins {
+		origins[i] = label
+	}
+	extra, extraOrigins, err := readDropIns[R](path)
+	if err != nil {
+		return nil, nil, err
+	}
+	return append(base, extra...), append(origins, extraOrigins...), nil
+}
+
+// checkRouteHosts fails if any route host (base or drop-in) appears twice.
+func checkRouteHosts[R any](routes []R, origins []string, hostOf func(R) string) error {
+	hosts := make([]sourced, len(routes))
+	for i, r := range routes {
+		hosts[i] = sourced{host: hostOf(r), origin: origins[i]}
+	}
+	return checkDuplicateHosts(hosts)
 }
 
 func (c *EdgeConfig) Validate() error {
@@ -97,17 +111,11 @@ func LoadAgent(path string) (*AgentConfig, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
-	origins := make([]string, len(c.Routes))
-	base := filepath.Base(path)
-	for i := range origins {
-		origins[i] = base
-	}
-	extra, extraOrigins, err := readAgentDropIns(path)
+	routes, origins, err := loadRoutes(path, c.Routes)
 	if err != nil {
 		return nil, err
 	}
-	c.Routes = append(c.Routes, extra...)
-	origins = append(origins, extraOrigins...)
+	c.Routes = routes
 
 	if c.Reconnect.MinBackoff == 0 {
 		c.Reconnect.MinBackoff = Duration(time.Second)
@@ -122,11 +130,7 @@ func LoadAgent(path string) (*AgentConfig, error) {
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
-	hosts := make([]sourced, len(c.Routes))
-	for i, r := range c.Routes {
-		hosts[i] = sourced{host: r.Host, origin: origins[i]}
-	}
-	if err := checkDuplicateHosts(hosts); err != nil {
+	if err := checkRouteHosts(c.Routes, origins, func(r AgentRoute) string { return r.Host }); err != nil {
 		return nil, err
 	}
 	return &c, nil

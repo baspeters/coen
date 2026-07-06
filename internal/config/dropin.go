@@ -28,41 +28,19 @@ type sourced struct {
 	origin string
 }
 
-// readEdgeDropIns loads routes from every *.yaml in the drop-in dir (sorted),
-// strict-decoding each as a routes-only fragment. A missing dir is not an error.
-func readEdgeDropIns(path string) ([]EdgeRoute, []string, error) {
+// readDropIns loads routes from every *.yaml in the drop-in dir (sorted),
+// strict-decoding each as a routes-only fragment of route type R. A missing dir
+// is not an error. It returns the routes and a parallel list of origin labels.
+func readDropIns[R any](path string) ([]R, []string, error) {
 	files, err := dropInFiles(path)
 	if err != nil {
 		return nil, nil, err
 	}
-	var routes []EdgeRoute
+	var routes []R
 	var origins []string
 	for _, f := range files {
 		var frag struct {
-			Routes []EdgeRoute `yaml:"routes"`
-		}
-		if err := strictDecodeFile(f, &frag); err != nil {
-			return nil, nil, err
-		}
-		for _, r := range frag.Routes {
-			routes = append(routes, r)
-			origins = append(origins, dropInLabel(path, f))
-		}
-	}
-	return routes, origins, nil
-}
-
-// readAgentDropIns is the agent-side counterpart of readEdgeDropIns.
-func readAgentDropIns(path string) ([]AgentRoute, []string, error) {
-	files, err := dropInFiles(path)
-	if err != nil {
-		return nil, nil, err
-	}
-	var routes []AgentRoute
-	var origins []string
-	for _, f := range files {
-		var frag struct {
-			Routes []AgentRoute `yaml:"routes"`
+			Routes []R `yaml:"routes"`
 		}
 		if err := strictDecodeFile(f, &frag); err != nil {
 			return nil, nil, err
