@@ -40,7 +40,7 @@ func newEdgeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			state := &obs.State{}
+			state := obs.NewState("edge")
 			e, err := edge.New(cfg, log, state)
 			if err != nil {
 				return err
@@ -68,7 +68,7 @@ func newAgentCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			state := &obs.State{}
+			state := obs.NewState("agent")
 			a, err := agent.New(cfg, log, state)
 			if err != nil {
 				return err

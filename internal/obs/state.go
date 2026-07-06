@@ -8,6 +8,7 @@ import (
 
 // State holds live counters shared between the running daemon and the admin socket.
 type State struct {
+	role          string // "edge" or "agent"; tags snapshots so status renders per role
 	connected     atomic.Bool
 	connectedNano atomic.Int64
 	activeStreams atomic.Int64
@@ -21,17 +22,27 @@ type State struct {
 	peerFP        atomic.Value // string
 
 	agentsMu sync.Mutex
-	agents   map[string]time.Time // edge: connected agents by fingerprint
+	agents   map[string]agentEntry // edge: connected agents by fingerprint
 }
 
-// AgentConnected records a live edge<-agent tunnel keyed by fingerprint.
-func (s *State) AgentConnected(fp string) {
+// agentEntry is the per-agent info the edge tracks for a connected tunnel.
+type agentEntry struct {
+	since time.Time
+	addr  string
+}
+
+// NewState returns a State tagged with the daemon's role ("edge" or "agent").
+func NewState(role string) *State { return &State{role: role} }
+
+// AgentConnected records a live edge<-agent tunnel keyed by fingerprint, with
+// the agent's remote address.
+func (s *State) AgentConnected(fp, addr string) {
 	s.agentsMu.Lock()
 	defer s.agentsMu.Unlock()
 	if s.agents == nil {
-		s.agents = make(map[string]time.Time)
+		s.agents = make(map[string]agentEntry)
 	}
-	s.agents[fp] = time.Now()
+	s.agents[fp] = agentEntry{since: time.Now(), addr: addr}
 }
 
 // AgentDisconnected removes a tunnel.
@@ -44,6 +55,7 @@ func (s *State) AgentDisconnected(fp string) {
 // AgentInfo describes one connected agent in a Snapshot.
 type AgentInfo struct {
 	Fingerprint    string    `json:"fingerprint"`
+	RemoteAddr     string    `json:"remote_addr,omitempty"`
 	ConnectedSince time.Time `json:"connected_since"`
 }
 
@@ -70,6 +82,7 @@ func (s *State) HandshakeFail()    { s.handshakeFail.Add(1) }
 func (s *State) SetError(e string) { s.lastError.Store(e) }
 
 type Snapshot struct {
+	Role            string      `json:"role,omitempty"`
 	TunnelConnected bool        `json:"tunnel_connected"`
 	ConnectedSince  time.Time   `json:"connected_since,omitzero"`
 	ActiveStreams   int64       `json:"active_streams"`
@@ -93,6 +106,7 @@ func loadStr(v *atomic.Value) string {
 
 func (s *State) Snapshot() Snapshot {
 	snap := Snapshot{
+		Role:            s.role,
 		TunnelConnected: s.connected.Load(),
 		ActiveStreams:   s.activeStreams.Load(),
 		TotalStreams:    s.totalStreams.Load(),
@@ -108,8 +122,8 @@ func (s *State) Snapshot() Snapshot {
 		snap.ConnectedSince = time.Unix(0, s.connectedNano.Load())
 	}
 	s.agentsMu.Lock()
-	for fp, since := range s.agents {
-		snap.Agents = append(snap.Agents, AgentInfo{Fingerprint: fp, ConnectedSince: since})
+	for fp, e := range s.agents {
+		snap.Agents = append(snap.Agents, AgentInfo{Fingerprint: fp, RemoteAddr: e.addr, ConnectedSince: e.since})
 	}
 	s.agentsMu.Unlock()
 	return snap

@@ -184,8 +184,8 @@ func (e *Edge) serveAgent(conn net.Conn) {
 		_ = session.Close()
 		return
 	}
-	e.state.AgentConnected(fp)
-	e.log.Info("agent.connected", "peer_fp", fp)
+	e.state.AgentConnected(fp, tlsConn.RemoteAddr().String())
+	e.log.Info("agent.connected", "peer_fp", fp, "remote_addr", tlsConn.RemoteAddr().String())
 
 	<-session.CloseChan()
 	if e.reg.remove(fp, session) {

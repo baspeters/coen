@@ -30,7 +30,7 @@ func TestHandleIngressEvictsDeadSessionOnOpenStreamFailure(t *testing.T) {
 	if !e.reg.register("FP-A", srv) {
 		t.Fatal("register should succeed on an empty registry")
 	}
-	e.state.AgentConnected("FP-A")
+	e.state.AgentConnected("FP-A", "203.0.113.7:5555")
 
 	// Kill the session so OpenStream fails, as on a silent partition.
 	_ = cli.Close()

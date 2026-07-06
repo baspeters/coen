@@ -193,14 +193,33 @@ func TestSnapshotConnectedSinceOmitZero(t *testing.T) {
 
 func TestAgentSet(t *testing.T) {
 	var s State
-	s.AgentConnected("AA")
-	s.AgentConnected("BB")
+	s.AgentConnected("AA", "10.0.0.1:1000")
+	s.AgentConnected("BB", "10.0.0.2:2000")
 	snap := s.Snapshot()
 	if len(snap.Agents) != 2 {
 		t.Fatalf("agents = %d, want 2", len(snap.Agents))
 	}
+	byFP := map[string]string{}
+	for _, a := range snap.Agents {
+		byFP[a.Fingerprint] = a.RemoteAddr
+	}
+	if byFP["AA"] != "10.0.0.1:1000" {
+		t.Fatalf("agent AA remote_addr = %q, want 10.0.0.1:1000", byFP["AA"])
+	}
 	s.AgentDisconnected("AA")
 	if got := len(s.Snapshot().Agents); got != 1 {
 		t.Fatalf("agents after disconnect = %d, want 1", got)
+	}
+}
+
+func TestNewStateTagsSnapshotRole(t *testing.T) {
+	if r := NewState("edge").Snapshot().Role; r != "edge" {
+		t.Fatalf("edge snapshot role = %q, want edge", r)
+	}
+	if r := NewState("agent").Snapshot().Role; r != "agent" {
+		t.Fatalf("agent snapshot role = %q, want agent", r)
+	}
+	if r := (&State{}).Snapshot().Role; r != "" {
+		t.Fatalf("untagged snapshot role = %q, want empty", r)
 	}
 }
