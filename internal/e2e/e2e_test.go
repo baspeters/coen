@@ -100,7 +100,7 @@ func serveBackend(c net.Conn) {
 func startStack(t *testing.T, ingressTLS *tls.Config) (ingressAddr string, edgeBuf, agentBuf *syncBuf) {
 	t.Helper()
 	backend := startBackend(t)
-	return buildStack(t, ingressTLS,
+	return buildStack(t, "debug", ingressTLS,
 		[]string{"*"},
 		[]config.AgentRoute{{Host: "*", Service: backend.Addr().String()}})
 }
@@ -108,7 +108,7 @@ func startStack(t *testing.T, ingressTLS *tls.Config) (ingressAddr string, edgeB
 // buildStack wires edge + agent with the given edge host patterns (all owned by
 // the single test agent) and agent host->backend routes, then waits for the
 // tunnel to register. It returns the ingress address and the log buffers.
-func buildStack(t *testing.T, ingressTLS *tls.Config, edgeHosts []string, agentRoutes []config.AgentRoute) (ingressAddr string, edgeBuf, agentBuf *syncBuf) {
+func buildStack(t *testing.T, logLevel string, ingressTLS *tls.Config, edgeHosts []string, agentRoutes []config.AgentRoute) (ingressAddr string, edgeBuf, agentBuf *syncBuf) {
 	t.Helper()
 	ca, err := pki.CreateCA()
 	if err != nil {
@@ -128,8 +128,8 @@ func buildStack(t *testing.T, ingressTLS *tls.Config, edgeHosts []string, agentR
 	edgeCert, _ := tls.X509KeyPair(ecPEM, ekPEM)
 
 	edgeBuf, agentBuf = &syncBuf{}, &syncBuf{}
-	edgeLog, _, _ := obs.NewLogger("debug", "text", edgeBuf)
-	agentLog, _, _ := obs.NewLogger("debug", "text", agentBuf)
+	edgeLog, _, _ := obs.NewLogger(logLevel, "text", edgeBuf)
+	agentLog, _, _ := obs.NewLogger(logLevel, "text", agentBuf)
 	var edgeState, agentState obs.State
 
 	edgeRoutes := make([]config.EdgeRoute, len(edgeHosts))
@@ -289,7 +289,7 @@ func TestEndToEndHostRouting(t *testing.T) {
 	appBackend := startBackendBody(t, "backend-app")
 	apiBackend := startBackendBody(t, "backend-api")
 
-	addr, _, _ := buildStack(t, nil,
+	addr, _, _ := buildStack(t, "debug", nil,
 		[]string{"app.example.com", "api.example.com"},
 		[]config.AgentRoute{
 			{Host: "app.example.com", Service: appBackend.Addr().String()},
@@ -316,5 +316,37 @@ func TestEndToEndHostRouting(t *testing.T) {
 	// A host with no route gets a 404 from the edge.
 	if got := get("unknown.example.com"); !strings.Contains(got, "404") {
 		t.Fatalf("unknown host should 404, got: %q", got)
+	}
+}
+
+func TestPerRequestEventsAreDebugLevel(t *testing.T) {
+	backend := startBackend(t)
+	addr, edgeBuf, agentBuf := buildStack(t, "info", nil,
+		[]string{"*"}, []config.AgentRoute{{Host: "*", Service: backend.Addr().String()}})
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(conn, "GET / HTTP/1.0\r\nHost: x\r\n\r\n")
+	_, _ = io.ReadAll(conn)
+	conn.Close()
+	time.Sleep(50 * time.Millisecond) // let stream.closed flush
+
+	edgeOut, agentOut := edgeBuf.String(), agentBuf.String()
+	// Lifecycle stays at info.
+	if !strings.Contains(edgeOut, "tunnel.listen") {
+		t.Fatalf("edge info log should keep lifecycle events:\n%s", edgeOut)
+	}
+	// Per-request events must not appear at info.
+	for _, ev := range []string{"ingress.accept", "stream.closed"} {
+		if strings.Contains(edgeOut, ev) {
+			t.Fatalf("edge %q should be debug, but appeared at info:\n%s", ev, edgeOut)
+		}
+	}
+	for _, ev := range []string{"stream.accept", "stream.closed"} {
+		if strings.Contains(agentOut, ev) {
+			t.Fatalf("agent %q should be debug, but appeared at info:\n%s", ev, agentOut)
+		}
 	}
 }

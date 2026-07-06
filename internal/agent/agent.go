@@ -183,7 +183,7 @@ func (a *Agent) handleStream(stream net.Conn) {
 		errpage.Write(stream, 502, "Bad Gateway", "No backend for host", p.ConnID)
 		return
 	}
-	log.Info("stream.accept")
+	log.Debug("stream.accept")
 	svc, err := (&net.Dialer{Timeout: 10 * time.Second}).Dial("tcp", svcAddr)
 	if err != nil {
 		log.Error("service.dial_error", "address", svcAddr, "error", err.Error())
@@ -194,7 +194,7 @@ func (a *Agent) handleStream(stream net.Conn) {
 	log.Debug("service.dial", "address", svcAddr)
 	in, out, _ := proxy.Pipe(stream, svc)
 	a.state.StreamClosed(in, out)
-	log.Info("stream.closed", "bytes_in", in, "bytes_out", out)
+	log.Debug("stream.closed", "bytes_in", in, "bytes_out", out)
 }
 
 func withJitter(d time.Duration) time.Duration {

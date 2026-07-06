@@ -217,7 +217,7 @@ func (e *Edge) handleIngress(conn net.Conn) {
 	}
 	_ = conn.SetReadDeadline(time.Time{}) // clear before streaming
 	log = log.With("host", host)
-	log.Info("ingress.accept")
+	log.Debug("ingress.accept")
 
 	rs, ok := e.routes.Match(host)
 	if !ok {
@@ -261,5 +261,5 @@ func (e *Edge) handleIngress(conn net.Conn) {
 	client := proxy.NewIdleConn(conn, e.cfg.Ingress.IdleTimeout.Duration())
 	in, out, _ := proxy.Pipe(proxy.WithPrefix(client, head), stream)
 	e.state.StreamClosed(in, out)
-	log.Info("stream.closed", "bytes_in", in, "bytes_out", out)
+	log.Debug("stream.closed", "bytes_in", in, "bytes_out", out)
 }
