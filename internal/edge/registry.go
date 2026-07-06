@@ -16,15 +16,6 @@ func newRegistry() *registry {
 	return &registry{sessions: make(map[string]*yamux.Session)}
 }
 
-// set stores s under fp and returns any session it displaced.
-func (r *registry) set(fp string, s *yamux.Session) (prev *yamux.Session) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	prev = r.sessions[fp]
-	r.sessions[fp] = s
-	return prev
-}
-
 // register stores s as the session for fp unless a still-live session already
 // owns fp, in which case the incumbent is kept and false is returned. A dead
 // incumbent (its connection already gone) is replaced. This stops a serving

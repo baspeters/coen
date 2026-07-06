@@ -10,6 +10,17 @@ import (
 
 // newServerSession builds a real edge/agent yamux pair over net.Pipe (no TLS
 // needed) and is reused by the edge routing/draining tests.
+// set stores s under fp and returns any session it displaced. It is a
+// test-only helper for seeding the registry directly; production code uses the
+// guarded register instead.
+func (r *registry) set(fp string, s *yamux.Session) (prev *yamux.Session) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	prev = r.sessions[fp]
+	r.sessions[fp] = s
+	return prev
+}
+
 func newServerSession(t *testing.T) (*yamux.Session, *yamux.Session) {
 	t.Helper()
 	a, b := net.Pipe()
