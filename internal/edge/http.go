@@ -43,10 +43,21 @@ func readRequestHead(r io.Reader, maxBytes int) (head []byte, host string, err e
 
 func parseHost(head []byte) (string, error) {
 	lines := bytes.Split(head, []byte("\r\n"))
+	host := ""
+	found := false
 	for _, ln := range lines[1:] { // skip the request line
 		if len(ln) >= 5 && strings.EqualFold(string(ln[:5]), "host:") {
-			return route.Normalize(strings.TrimSpace(string(ln[5:]))), nil
+			if found {
+				// RFC 7230: reject a request carrying more than one Host header,
+				// to avoid host-routing ambiguity between the edge and a backend.
+				return "", fmt.Errorf("multiple Host headers")
+			}
+			host = route.Normalize(strings.TrimSpace(string(ln[5:])))
+			found = true
 		}
 	}
-	return "", fmt.Errorf("no Host header")
+	if !found {
+		return "", fmt.Errorf("no Host header")
+	}
+	return host, nil
 }
