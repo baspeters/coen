@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"math/rand"
 	"net"
-	"os"
 	"sync"
 	"time"
 
@@ -44,17 +43,9 @@ func (a *Agent) drainStreams() {
 }
 
 func New(cfg *config.AgentConfig, log *slog.Logger, state *obs.State) (*Agent, error) {
-	caPEM, err := os.ReadFile(cfg.Edge.CA)
-	if err != nil {
-		return nil, fmt.Errorf("read ca: %w", err)
-	}
-	pool, err := pki.CertPoolFromPEM(caPEM)
+	pool, cert, err := tunnel.LoadMaterial(cfg.Edge.CA, cfg.Edge.Cert, cfg.Edge.Key, "client cert")
 	if err != nil {
 		return nil, err
-	}
-	cert, err := tls.LoadX509KeyPair(cfg.Edge.Cert, cfg.Edge.Key)
-	if err != nil {
-		return nil, fmt.Errorf("load client cert: %w", err)
 	}
 	host, _, err := net.SplitHostPort(cfg.Edge.Address)
 	if err != nil {

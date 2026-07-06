@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"os"
 	"sync"
 	"time"
 
@@ -39,17 +38,9 @@ type Edge struct {
 }
 
 func New(cfg *config.EdgeConfig, log *slog.Logger, state *obs.State) (*Edge, error) {
-	caPEM, err := os.ReadFile(cfg.Tunnel.CA)
-	if err != nil {
-		return nil, fmt.Errorf("read ca: %w", err)
-	}
-	pool, err := pki.CertPoolFromPEM(caPEM)
+	pool, cert, err := tunnel.LoadMaterial(cfg.Tunnel.CA, cfg.Tunnel.Cert, cfg.Tunnel.Key, "edge cert")
 	if err != nil {
 		return nil, err
-	}
-	cert, err := tls.LoadX509KeyPair(cfg.Tunnel.Cert, cfg.Tunnel.Key)
-	if err != nil {
-		return nil, fmt.Errorf("load edge cert: %w", err)
 	}
 	e := &Edge{cfg: cfg, log: log, state: state, tunTLS: tunnel.ServerTLSConfig(pool, cert), allowed: cfg.AllowedFingerprints(), reg: newRegistry(), sem: newSemaphore(cfg.Ingress.MaxConnections)}
 	entries := make([]route.Entry[*routeState], 0, len(cfg.Routes))
