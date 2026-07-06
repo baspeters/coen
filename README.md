@@ -383,8 +383,8 @@ Everything lives under one binary, invoked as `coen <command>`.
 | `coen cert init` | Create a new Coen CA (`ca.crt`, `ca.key`). |
 | `coen cert edge` | Issue the edge (server) certificate, signed by the CA. |
 | `coen cert agent` | Issue an agent (client) certificate. |
-| `coen doctor` | Role-aware preflight checks with pass/fail results and remediation hints. |
-| `coen status` | Live snapshot from a running daemon over its admin socket. |
+| `coen doctor` | Role-aware preflight checks with pass/fail results and remediation hints. Auto-detects the role from the running daemon; pass `--role` for a preflight before the daemon is started. |
+| `coen status` | Live snapshot from a running daemon over its admin socket. Auto-detects which daemon is running; `--socket` or `--role` override it. |
 | `coen install` | Write a service definition (systemd unit on Linux, launchd plist on macOS) and an example config for a role. |
 | `coen version` | Print the version. |
 
@@ -400,9 +400,12 @@ coen cert agent --dir /etc/coen/pki --name laptop-agent       # --name becomes t
 coen edge  --config /etc/coen/edge.yaml
 coen agent --config /etc/coen/agent.yaml
 
-# Diagnostics.
-coen doctor --role edge  --config /etc/coen/edge.yaml         # exits non-zero if any check fails
-coen status --socket /run/coen/edge.sock                      # add --json for scripts
+# Diagnostics. With a daemon running, both auto-detect the role from the host's
+# process table, so on each host `coen doctor` and `coen status` need no flags.
+coen doctor                                                   # auto-detects role; exits non-zero if any check fails
+coen doctor --role edge  --config /etc/coen/edge.yaml         # preflight before the daemon is started
+coen status                                                   # auto-detects the running daemon
+coen status --socket /run/coen/edge.sock                      # or point at a socket; add --json for scripts
 
 # Packaging.
 coen install edge  --unit-dir /etc/systemd/system --config-dir /etc/coen --bin /usr/local/bin/coen
@@ -619,9 +622,9 @@ those fingerprints is the connection allowlist. An agent whose fingerprint owns
 no route is refused, and an agent cannot serve a hostname it was not granted.
 
 A fingerprint has at most one live session. A second connection presenting the
-same certificate, whether a health probe such as `coen doctor --role agent` or a
-duplicate certificate on two hosts, is refused without disturbing the serving
-agent; a genuine reconnect still works, because the previous session is already
+same certificate, for example a duplicate certificate deployed on two hosts, is
+refused without disturbing the serving agent; a genuine reconnect still works,
+because the previous session is already
 gone by the time the agent redials.
 
 Because the edge routes on the HTTP `Host` header, it parses the request head of
@@ -659,15 +662,19 @@ Because every request carries a `conn_id` in its stream preamble, the same id sh
 the edge and agent logs. Running `grep <conn_id>` on either host reconstructs one request's
 whole lifecycle.
 
-`coen status` returns a live snapshot over a local Unix socket: active and total streams,
-bytes in and out, reconnect count, last error, and handshake counts. On the edge it lists the
-connected agents with their fingerprints and connect times; on the agent it shows whether the
-tunnel is up and since when. Add `--json` for scripts. If `admin.socket` is unset, the status
-socket is disabled.
+`coen status` returns a live snapshot over a local Unix socket and shows role-appropriate
+fields. With a daemon running it auto-detects the role and socket from the host's process
+table, so `coen status` needs no flags; `--socket` or `--role` override it. On the edge it
+lists each connected agent with its source address and fingerprint, plus active and total
+streams, bytes in and out, and handshake counts. On the agent it shows whether the tunnel is
+up and since when, the peer fingerprint, reconnect count, and last error. Add `--json` for
+scripts. If `admin.socket` is unset, the status socket is disabled.
 
 `coen doctor` runs the role-aware preflight described above and exits non-zero if anything
-fails, so it fits into deploy scripts. Its agent-side mTLS check is safe to run against a live
-agent: the edge keeps the serving session and refuses the probe. Only the `log.level` can be
+fails, so it fits into deploy scripts. With a daemon running it auto-detects the role, and
+when the agent's tunnel is already up it verifies edge reachability and mTLS from that live
+tunnel rather than opening a fresh connection, so a health check never perturbs the serving
+edge. Only the `log.level` can be
 changed on a running daemon (with `systemctl reload` or `SIGHUP`); other changes need a
 restart.
 
