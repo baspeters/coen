@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/baspeters/coen/internal/config"
@@ -19,6 +20,19 @@ func newDoctorCmd() *cobra.Command {
 		Short: "Diagnose the local edge/agent setup",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if role == "" {
+				r, c, err := detectRole()
+				if err != nil {
+					if errors.Is(err, errNoDaemon) {
+						return fmt.Errorf("no running coen daemon to auto-detect; pass --role edge|agent (with --config for a preflight check)")
+					}
+					return err
+				}
+				role = r
+				if cfgPath == "" {
+					cfgPath = c
+				}
+			}
 			if cfgPath == "" && (role == "edge" || role == "agent") {
 				cfgPath = "/etc/coen/" + role + ".yaml"
 			}

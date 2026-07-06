@@ -49,6 +49,19 @@ func checkBind(name, addr, adminSocket string) Result {
 	return fail(name, err.Error(), "another process may hold the port, or you lack permission to bind it (:443 needs CAP_NET_BIND_SERVICE)")
 }
 
+// agentLiveTunnel reports whether the local agent (via its admin socket) already
+// has an established tunnel, and the edge fingerprint it is connected to.
+func agentLiveTunnel(socket string) (edgeFP string, live bool) {
+	if socket == "" {
+		return "", false
+	}
+	snap, err := admin.Status(socket)
+	if err != nil || !snap.TunnelConnected {
+		return "", false
+	}
+	return snap.PeerFingerprint, true
+}
+
 // CheckAgent runs preflight checks for the agent role.
 func CheckAgent(cfg *config.AgentConfig) []Result {
 	var out []Result
@@ -90,31 +103,44 @@ func CheckAgent(cfg *config.AgentConfig) []Result {
 	}
 
 	addr := net.JoinHostPort(host, port)
-	c, err := net.DialTimeout("tcp", addr, 5*time.Second)
-	if err != nil {
-		return append(out, fail("net: tcp reach", err.Error(), fmt.Sprintf("open port %s on the edge / firewall", port)))
-	}
-	_ = c.Close()
-	out = append(out, ok("net: tcp reach", addr))
 
-	clientTLS := tunnel.ClientTLSConfig(pool, clientCert, host)
-	tconn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr, clientTLS)
-	if err != nil {
-		out = append(out, fail("mtls: handshake", err.Error(), "verify the CA matches on both hosts and the edge cert covers "+host))
-	} else {
-		leaf := tconn.ConnectionState().PeerCertificates[0]
-		edgeFP := pki.Fingerprint(leaf)
-		out = append(out, ok("mtls: handshake", "transport TLS ok, edge fingerprint "+edgeFP+" (route authorization is enforced by the edge, not verified here)"))
+	// If the local agent is already connected, verify reachability and mTLS from
+	// its live tunnel rather than probing the edge. An active probe would perturb
+	// the edge: a reachability connect reads as an incomplete handshake, and an
+	// mTLS probe as a duplicate fingerprint. Observe, don't perturb.
+	if edgeFP, live := agentLiveTunnel(cfg.Admin.Socket); live {
+		out = append(out, ok("net: tcp reach", addr+" (the running agent's tunnel is live)"))
+		out = append(out, ok("mtls: handshake", "verified via the running agent's live tunnel to edge "+edgeFP))
 		if pin := cfg.Edge.EdgeFingerprint; pin != "" && pin != edgeFP {
 			out = append(out, fail("mtls: pin", fmt.Sprintf("got %s want %s", edgeFP, pin), "update edge_fingerprint or the edge certificate"))
 		}
-		now := time.Now()
-		if now.Before(leaf.NotBefore) || now.After(leaf.NotAfter) {
-			out = append(out, fail("time: cert validity", fmt.Sprintf("now=%s window=[%s,%s]", now.Format(time.RFC3339), leaf.NotBefore.Format(time.RFC3339), leaf.NotAfter.Format(time.RFC3339)), "check the system clock (NTP) or re-issue the certificate"))
-		} else {
-			out = append(out, ok("time: cert validity", "within the edge certificate window"))
+	} else {
+		c, err := net.DialTimeout("tcp", addr, 5*time.Second)
+		if err != nil {
+			return append(out, fail("net: tcp reach", err.Error(), fmt.Sprintf("open port %s on the edge / firewall", port)))
 		}
-		_ = tconn.Close()
+		_ = c.Close()
+		out = append(out, ok("net: tcp reach", addr))
+
+		clientTLS := tunnel.ClientTLSConfig(pool, clientCert, host)
+		tconn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr, clientTLS)
+		if err != nil {
+			out = append(out, fail("mtls: handshake", err.Error(), "verify the CA matches on both hosts and the edge cert covers "+host))
+		} else {
+			leaf := tconn.ConnectionState().PeerCertificates[0]
+			edgeFP := pki.Fingerprint(leaf)
+			out = append(out, ok("mtls: handshake", "transport TLS ok, edge fingerprint "+edgeFP+" (route authorization is enforced by the edge, not verified here)"))
+			if pin := cfg.Edge.EdgeFingerprint; pin != "" && pin != edgeFP {
+				out = append(out, fail("mtls: pin", fmt.Sprintf("got %s want %s", edgeFP, pin), "update edge_fingerprint or the edge certificate"))
+			}
+			now := time.Now()
+			if now.Before(leaf.NotBefore) || now.After(leaf.NotAfter) {
+				out = append(out, fail("time: cert validity", fmt.Sprintf("now=%s window=[%s,%s]", now.Format(time.RFC3339), leaf.NotBefore.Format(time.RFC3339), leaf.NotAfter.Format(time.RFC3339)), "check the system clock (NTP) or re-issue the certificate"))
+			} else {
+				out = append(out, ok("time: cert validity", "within the edge certificate window"))
+			}
+			_ = tconn.Close()
+		}
 	}
 
 	for _, r := range cfg.Routes {
