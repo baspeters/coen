@@ -27,6 +27,7 @@ func init() { register(newInstallCmd) }
 
 func newInstallCmd() *cobra.Command {
 	var unitDir, configDir, bin string
+	var force bool
 	cmd := &cobra.Command{
 		Use:   "install [edge|agent]",
 		Short: "Install a service definition and example config for a role",
@@ -49,7 +50,13 @@ func newInstallCmd() *cobra.Command {
 				return err
 			}
 			unitPath := filepath.Join(unitDir, filename)
-			if err := os.WriteFile(unitPath, []byte(content), 0o644); err != nil {
+			// Preserve an existing unit file (which an operator may have
+			// customized) unless --force, mirroring the config-preservation
+			// policy below. Only a regular file is preserved, so a stray
+			// directory at the path still surfaces a write error.
+			if info, statErr := os.Stat(unitPath); statErr == nil && info.Mode().IsRegular() && !force {
+				fmt.Fprintf(cmd.OutOrStdout(), "service definition exists, not overwriting: %s (use --force to replace)\n", unitPath)
+			} else if err := os.WriteFile(unitPath, []byte(content), 0o644); err != nil {
 				return err
 			}
 
@@ -82,6 +89,7 @@ func newInstallCmd() *cobra.Command {
 	cmd.Flags().StringVar(&unitDir, "unit-dir", "", "service definition directory (default: /etc/systemd/system on Linux, /Library/LaunchDaemons on macOS)")
 	cmd.Flags().StringVar(&configDir, "config-dir", "/etc/coen", "config directory")
 	cmd.Flags().StringVar(&bin, "bin", "/usr/local/bin/coen", "path to the coen binary")
+	cmd.Flags().BoolVar(&force, "force", false, "overwrite an existing service definition")
 	return cmd
 }
 
