@@ -307,7 +307,7 @@ python3 -m http.server 9000            # stand-in for your private app
 Check the tunnel and send a request through it.
 
 ```bash
-./bin/coen status --socket /tmp/coen-edge.sock     # reports tunnel: true
+./bin/coen status --socket /tmp/coen-edge.sock     # lists the connected agent
 curl http://127.0.0.1:8000/                        # served by :9000, through the tunnel
 ```
 
@@ -512,7 +512,7 @@ admin:
 | `drain_timeout` | duration | `15s` | On shutdown, finish in-flight streams for up to this long before force-closing. `0` or unset uses the default (15s). |
 | `log.level` | string | `info` | `trace`, `debug`, `info`, `warn`, or `error`. |
 | `log.format` | string | autodetect | `text`, `json`, or `journal`. Unset autodetects: `journal` under systemd (journald), otherwise `text`. See [Log formats](#log-formats). |
-| `admin.socket` | path | (unset) | Unix socket for `coen status`. When unset, the status socket is disabled. |
+| `admin.socket` | path | (unset) | Unix socket for `coen status` and `coen doctor`'s live-tunnel check. When unset, the admin socket is disabled. |
 
 ### Agent configuration (`agent.yaml`)
 
@@ -551,7 +551,7 @@ admin:
 | `drain_timeout` | duration | `15s` | On shutdown, finish in-flight streams for up to this long. `0` or unset uses the default (15s). |
 | `log.level` | string | `info` | `trace`, `debug`, `info`, `warn`, or `error`. |
 | `log.format` | string | autodetect | `text`, `json`, or `journal`. Unset autodetects: `journal` under systemd (journald), otherwise `text`. See [Log formats](#log-formats). |
-| `admin.socket` | path | (unset) | Unix socket for `coen status`. When unset, the status socket is disabled. |
+| `admin.socket` | path | (unset) | Unix socket for `coen status` and `coen doctor`'s live-tunnel check. When unset, the admin socket is disabled. |
 
 Host patterns appear on both ends: the edge authorizes which agent owns a host, and the agent
 maps the same host to a backend.
@@ -652,7 +652,7 @@ A two-sided tunnel is awkward to debug, so observability is built into the core 
 bolted on.
 
 Logging uses `log/slog` in text, JSON, or a journald-friendly `journal` format (see [Log formats](#log-formats)). Each step is a named event, for example `edge.dial`,
-`tunnel.tls_handshake`, `tunnel.established`, `agent.connected`, `ingress.accept`,
+`agent.tls_handshake`, `tunnel.established`, `agent.connected`, `ingress.accept`,
 `stream.open`, `stream.closed`, and `reconnect.scheduled`, with timing and the concrete reason
 on failure. The edge stamps its build version into each stream preamble, and the agent logs a
 one-time `version.mismatch` warning if the edge is running a different version, so an

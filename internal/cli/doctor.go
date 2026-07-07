@@ -78,8 +78,8 @@ func newDoctorCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&cfgPath, "config", "", "config file (defaults to /etc/coen/<role>.yaml)")
-	cmd.Flags().StringVar(&role, "role", "", "edge | agent")
+	cmd.Flags().StringVar(&cfgPath, "config", "", "config file (default: the running daemon's, else /etc/coen/<role>.yaml)")
+	cmd.Flags().StringVar(&role, "role", "", "edge | agent (default: auto-detected from the running daemon)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "output JSON")
 	return cmd
 }
