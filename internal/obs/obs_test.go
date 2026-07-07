@@ -95,6 +95,13 @@ func TestStateSnapshot(t *testing.T) {
 	if snap.PeerFingerprint != "SHA256:abc" {
 		t.Fatalf("bad fp: %+v", snap)
 	}
+	if snap.SelfFingerprint != "" {
+		t.Fatalf("self fingerprint should be empty until set, got %q", snap.SelfFingerprint)
+	}
+	s.SetSelfFingerprint("SHA256:self")
+	if got := s.Snapshot().SelfFingerprint; got != "SHA256:self" {
+		t.Fatalf("SelfFingerprint = %q, want SHA256:self", got)
+	}
 }
 
 func TestStateHandshakeErrorAndDisconnect(t *testing.T) {

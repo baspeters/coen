@@ -131,6 +131,9 @@ func agentIP(remoteAddr string) string {
 }
 
 func renderEdgeStatus(out io.Writer, s obs.Snapshot) {
+	if s.SelfFingerprint != "" {
+		fmt.Fprintf(out, "self_fp:    %s\n", s.SelfFingerprint)
+	}
 	fmt.Fprintf(out, "agents:     %d connected\n", len(s.Agents))
 	for _, a := range s.Agents {
 		fmt.Fprintf(out, "  - %s (%s, %s)\n", agentIP(a.RemoteAddr), a.ConnectedSince.Format("2006-01-02 15:04:05"), a.Fingerprint)
@@ -144,6 +147,9 @@ func renderEdgeStatus(out io.Writer, s obs.Snapshot) {
 }
 
 func renderAgentStatus(out io.Writer, s obs.Snapshot) {
+	if s.SelfFingerprint != "" {
+		fmt.Fprintf(out, "self_fp:    %s\n", s.SelfFingerprint)
+	}
 	if s.TunnelConnected {
 		fmt.Fprintf(out, "tunnel:     connected\n")
 		fmt.Fprintf(out, "since:      %s\n", s.ConnectedSince.Format("2006-01-02 15:04:05"))

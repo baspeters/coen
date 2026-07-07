@@ -83,6 +83,36 @@ func newTestEdge(t *testing.T) (e *Edge, tunLn, ingressLn net.Listener, agentTLS
 	return e, tunLn, ingressLn, agentTLS
 }
 
+// New records the edge's own certificate fingerprint in the state, so `coen
+// status` can show self_fp for the operator to cross-check against the agent's
+// peer_fp.
+func TestNewEdgeSetsSelfFingerprint(t *testing.T) {
+	ca, err := pki.CreateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	caPath := filepath.Join(dir, "ca.crt")
+	certPath := filepath.Join(dir, "edge.crt")
+	keyPath := filepath.Join(dir, "edge.key")
+	_ = os.WriteFile(caPath, ca.CertPEM(), 0o600)
+	ecPEM, ekPEM, _ := ca.IssueServer("127.0.0.1")
+	_ = os.WriteFile(certPath, ecPEM, 0o600)
+	_ = os.WriteFile(keyPath, ekPEM, 0o600)
+
+	cfg := &config.EdgeConfig{
+		Ingress: config.IngressConfig{Mode: "proxied", Listen: "127.0.0.1:0"},
+		Tunnel:  config.TunnelServerConfig{Listen: "127.0.0.1:0", CA: caPath, Cert: certPath, Key: keyPath},
+	}
+	st := &obs.State{}
+	if _, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), st); err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got, want := st.Snapshot().SelfFingerprint, fingerprintOf(t, ecPEM); got != want {
+		t.Fatalf("edge self_fp = %q, want %q", got, want)
+	}
+}
+
 func TestEdgeReturns502WithoutAgent(t *testing.T) {
 	e, tunLn, ingressLn, _ := newTestEdge(t)
 	defer tunLn.Close()

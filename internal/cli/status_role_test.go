@@ -15,6 +15,7 @@ func TestRenderStatusEdgeOmitsAgentFields(t *testing.T) {
 	var buf bytes.Buffer
 	renderStatus(&buf, obs.Snapshot{
 		Role:              "edge",
+		SelfFingerprint:   "SHA256:edgeself",
 		Agents:            []obs.AgentInfo{{Fingerprint: "SHA256:xyz", RemoteAddr: "198.51.100.7:4444", ConnectedSince: time.Unix(0, 0)}},
 		HandshakeOK:       2,
 		HandshakeRejected: 22,
@@ -22,6 +23,9 @@ func TestRenderStatusEdgeOmitsAgentFields(t *testing.T) {
 	s := buf.String()
 	if !strings.Contains(s, "role:       edge") {
 		t.Fatalf("missing role line: %s", s)
+	}
+	if !strings.Contains(s, "self_fp:    SHA256:edgeself") {
+		t.Fatalf("edge status should show its own fingerprint: %s", s)
 	}
 	// Agent line format is "  - <IP> (<SINCE>, <SHA256>)": connecting IP (no
 	// ephemeral port), then connect time and fingerprint in parentheses.
@@ -42,11 +46,14 @@ func TestRenderStatusEdgeOmitsAgentFields(t *testing.T) {
 func TestRenderStatusAgentOmitsEdgeFields(t *testing.T) {
 	var buf bytes.Buffer
 	renderStatus(&buf, obs.Snapshot{
-		Role: "agent", TunnelConnected: true, PeerFingerprint: "SHA256:edge", ConnectedSince: time.Unix(0, 0),
+		Role: "agent", SelfFingerprint: "SHA256:agentself", TunnelConnected: true, PeerFingerprint: "SHA256:edge", ConnectedSince: time.Unix(0, 0),
 	}, false)
 	s := buf.String()
 	if !strings.Contains(s, "tunnel:     connected") || !strings.Contains(s, "peer_fp:") {
 		t.Fatalf("agent status missing tunnel/peer: %s", s)
+	}
+	if !strings.Contains(s, "self_fp:    SHA256:agentself") {
+		t.Fatalf("agent status should show its own fingerprint: %s", s)
 	}
 	if strings.Contains(s, "agents:") {
 		t.Fatalf("agent status must not show the edge-only agents field: %s", s)

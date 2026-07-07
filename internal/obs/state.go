@@ -22,6 +22,7 @@ type State struct {
 	handshakeRejected atomic.Int64 // edge: unauthenticated/incompatible peers refused at TLS
 	lastError         atomic.Value // string
 	peerFP            atomic.Value // string
+	selfFP            atomic.Value // string: this daemon's own certificate fingerprint
 
 	agentsMu sync.Mutex
 	agents   map[string]agentEntry // edge: connected agents by fingerprint
@@ -99,6 +100,12 @@ func (s *State) HandshakeFail() { s.handshakeFail.Add(1) }
 func (s *State) HandshakeRejected() { s.handshakeRejected.Add(1) }
 func (s *State) SetError(e string)  { s.lastError.Store(e) }
 
+// SetSelfFingerprint records this daemon's own certificate fingerprint, set
+// once at startup. It lets an operator cross-check the two ends: the agent's
+// self_fp equals the fingerprint the edge lists for it, and the edge's self_fp
+// equals the agent's peer_fp.
+func (s *State) SetSelfFingerprint(fp string) { s.selfFP.Store(fp) }
+
 type Snapshot struct {
 	Role              string      `json:"role,omitempty"`
 	TunnelConnected   bool        `json:"tunnel_connected"`
@@ -113,6 +120,7 @@ type Snapshot struct {
 	HandshakeFail     int64       `json:"handshake_fail"`
 	HandshakeRejected int64       `json:"handshake_rejected"`
 	LastError         string      `json:"last_error,omitempty"`
+	SelfFingerprint   string      `json:"self_fingerprint,omitempty"`
 	PeerFingerprint   string      `json:"peer_fingerprint,omitempty"`
 	Agents            []AgentInfo `json:"agents,omitempty"`
 }
@@ -138,6 +146,7 @@ func (s *State) Snapshot() Snapshot {
 		HandshakeFail:     s.handshakeFail.Load(),
 		HandshakeRejected: s.handshakeRejected.Load(),
 		LastError:         loadStr(&s.lastError),
+		SelfFingerprint:   loadStr(&s.selfFP),
 		PeerFingerprint:   loadStr(&s.peerFP),
 	}
 	if snap.TunnelConnected {

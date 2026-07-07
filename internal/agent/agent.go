@@ -51,6 +51,9 @@ func New(cfg *config.AgentConfig, log *slog.Logger, state *obs.State) (*Agent, e
 	if err != nil {
 		return nil, fmt.Errorf("edge.address %q: %w", cfg.Edge.Address, err)
 	}
+	if cert.Leaf != nil {
+		state.SetSelfFingerprint(pki.Fingerprint(cert.Leaf))
+	}
 	entries := make([]route.Entry[string], 0, len(cfg.Routes))
 	for _, r := range cfg.Routes {
 		entries = append(entries, route.Entry[string]{Pattern: r.Host, Value: r.Service})

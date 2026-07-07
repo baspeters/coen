@@ -44,6 +44,9 @@ func New(cfg *config.EdgeConfig, log *slog.Logger, state *obs.State) (*Edge, err
 	if err != nil {
 		return nil, err
 	}
+	if cert.Leaf != nil {
+		state.SetSelfFingerprint(pki.Fingerprint(cert.Leaf))
+	}
 	e := &Edge{cfg: cfg, log: log, state: state, tunTLS: tunnel.ServerTLSConfig(pool, cert), allowed: cfg.AllowedFingerprints(), reg: newRegistry(), sem: newSemaphore(cfg.Ingress.MaxConnections)}
 	entries := make([]route.Entry[*routeState], 0, len(cfg.Routes))
 	for _, r := range cfg.Routes {

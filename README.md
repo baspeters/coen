@@ -672,8 +672,14 @@ not authorized for any route), and `rejected` (a peer refused at the TLS handsha
 presented no client certificate or an incompatible TLS version or cipher). On a public mTLS
 port `rejected` is routine scanner and probe noise that the edge correctly turns away, so it
 is kept separate from `fail`. On the agent `coen status` shows whether the tunnel is up and
-since when, the peer fingerprint, reconnect count, and last error. Add `--json` for scripts.
-If `admin.socket` is unset, the status socket is disabled.
+since when, the peer (edge) fingerprint, reconnect count, and last error. Add `--json` for
+scripts. If `admin.socket` is unset, the status socket is disabled.
+
+Because mTLS uses two certificates, the two ends naturally show different fingerprints: each
+side reports the peer's certificate. To let you cross-check that the right two daemons are
+connected, each also prints its own certificate fingerprint as `self_fp`. The agent's
+`peer_fp` should equal the edge's `self_fp`, and the fingerprint the edge lists for an agent
+should equal that agent's `self_fp`.
 
 `coen doctor` runs the role-aware preflight described above and exits non-zero if anything
 fails, so it fits into deploy scripts. With a daemon running it auto-detects the role, and
