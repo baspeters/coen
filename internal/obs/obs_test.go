@@ -102,6 +102,9 @@ func TestStateHandshakeErrorAndDisconnect(t *testing.T) {
 	s.HandshakeFail()
 	s.HandshakeFail()
 	s.HandshakeOK()
+	s.HandshakeRejected()
+	s.HandshakeRejected()
+	s.HandshakeRejected()
 	s.SetError("boom")
 	s.Reconnect()
 	s.Reconnect()
@@ -117,6 +120,9 @@ func TestStateHandshakeErrorAndDisconnect(t *testing.T) {
 	}
 	if snap.HandshakeOK != 1 {
 		t.Fatalf("HandshakeOK = %d, want 1", snap.HandshakeOK)
+	}
+	if snap.HandshakeRejected != 3 {
+		t.Fatalf("HandshakeRejected = %d, want 3", snap.HandshakeRejected)
 	}
 	if snap.LastError != "boom" {
 		t.Fatalf("LastError = %q, want %q", snap.LastError, "boom")

@@ -8,19 +8,20 @@ import (
 
 // State holds live counters shared between the running daemon and the admin socket.
 type State struct {
-	role          string // "edge" or "agent"; tags snapshots so status renders per role
-	connected     atomic.Bool
-	connectedNano atomic.Int64
-	activeStreams atomic.Int64
-	totalStreams  atomic.Int64
-	maxStreams    atomic.Int64 // high-water mark of concurrent streams
-	bytesIn       atomic.Int64
-	bytesOut      atomic.Int64
-	reconnects    atomic.Int64
-	handshakeOK   atomic.Int64
-	handshakeFail atomic.Int64
-	lastError     atomic.Value // string
-	peerFP        atomic.Value // string
+	role              string // "edge" or "agent"; tags snapshots so status renders per role
+	connected         atomic.Bool
+	connectedNano     atomic.Int64
+	activeStreams     atomic.Int64
+	totalStreams      atomic.Int64
+	maxStreams        atomic.Int64 // high-water mark of concurrent streams
+	bytesIn           atomic.Int64
+	bytesOut          atomic.Int64
+	reconnects        atomic.Int64
+	handshakeOK       atomic.Int64
+	handshakeFail     atomic.Int64
+	handshakeRejected atomic.Int64 // edge: unauthenticated/incompatible peers refused at TLS
+	lastError         atomic.Value // string
+	peerFP            atomic.Value // string
 
 	agentsMu sync.Mutex
 	agents   map[string]agentEntry // edge: connected agents by fingerprint
@@ -87,26 +88,33 @@ func (s *State) StreamClosed(in, out int64) {
 	s.bytesIn.Add(in)
 	s.bytesOut.Add(out)
 }
-func (s *State) Reconnect()        { s.reconnects.Add(1) }
-func (s *State) HandshakeOK()      { s.handshakeOK.Add(1) }
-func (s *State) HandshakeFail()    { s.handshakeFail.Add(1) }
-func (s *State) SetError(e string) { s.lastError.Store(e) }
+func (s *State) Reconnect()     { s.reconnects.Add(1) }
+func (s *State) HandshakeOK()   { s.handshakeOK.Add(1) }
+func (s *State) HandshakeFail() { s.handshakeFail.Add(1) }
+
+// HandshakeRejected counts a peer refused at the TLS handshake: it never
+// authenticated (no client certificate, or an incompatible TLS version or
+// cipher). On a public mTLS port this is routine scanner/probe noise, kept
+// separate from HandshakeFail so it does not look like an agent problem.
+func (s *State) HandshakeRejected() { s.handshakeRejected.Add(1) }
+func (s *State) SetError(e string)  { s.lastError.Store(e) }
 
 type Snapshot struct {
-	Role            string      `json:"role,omitempty"`
-	TunnelConnected bool        `json:"tunnel_connected"`
-	ConnectedSince  time.Time   `json:"connected_since,omitzero"`
-	ActiveStreams   int64       `json:"active_streams"`
-	MaxStreams      int64       `json:"max_streams"`
-	TotalStreams    int64       `json:"total_streams"`
-	BytesIn         int64       `json:"bytes_in"`
-	BytesOut        int64       `json:"bytes_out"`
-	Reconnects      int64       `json:"reconnects"`
-	HandshakeOK     int64       `json:"handshake_ok"`
-	HandshakeFail   int64       `json:"handshake_fail"`
-	LastError       string      `json:"last_error,omitempty"`
-	PeerFingerprint string      `json:"peer_fingerprint,omitempty"`
-	Agents          []AgentInfo `json:"agents,omitempty"`
+	Role              string      `json:"role,omitempty"`
+	TunnelConnected   bool        `json:"tunnel_connected"`
+	ConnectedSince    time.Time   `json:"connected_since,omitzero"`
+	ActiveStreams     int64       `json:"active_streams"`
+	MaxStreams        int64       `json:"max_streams"`
+	TotalStreams      int64       `json:"total_streams"`
+	BytesIn           int64       `json:"bytes_in"`
+	BytesOut          int64       `json:"bytes_out"`
+	Reconnects        int64       `json:"reconnects"`
+	HandshakeOK       int64       `json:"handshake_ok"`
+	HandshakeFail     int64       `json:"handshake_fail"`
+	HandshakeRejected int64       `json:"handshake_rejected"`
+	LastError         string      `json:"last_error,omitempty"`
+	PeerFingerprint   string      `json:"peer_fingerprint,omitempty"`
+	Agents            []AgentInfo `json:"agents,omitempty"`
 }
 
 func loadStr(v *atomic.Value) string {
@@ -118,18 +126,19 @@ func loadStr(v *atomic.Value) string {
 
 func (s *State) Snapshot() Snapshot {
 	snap := Snapshot{
-		Role:            s.role,
-		TunnelConnected: s.connected.Load(),
-		ActiveStreams:   s.activeStreams.Load(),
-		MaxStreams:      s.maxStreams.Load(),
-		TotalStreams:    s.totalStreams.Load(),
-		BytesIn:         s.bytesIn.Load(),
-		BytesOut:        s.bytesOut.Load(),
-		Reconnects:      s.reconnects.Load(),
-		HandshakeOK:     s.handshakeOK.Load(),
-		HandshakeFail:   s.handshakeFail.Load(),
-		LastError:       loadStr(&s.lastError),
-		PeerFingerprint: loadStr(&s.peerFP),
+		Role:              s.role,
+		TunnelConnected:   s.connected.Load(),
+		ActiveStreams:     s.activeStreams.Load(),
+		MaxStreams:        s.maxStreams.Load(),
+		TotalStreams:      s.totalStreams.Load(),
+		BytesIn:           s.bytesIn.Load(),
+		BytesOut:          s.bytesOut.Load(),
+		Reconnects:        s.reconnects.Load(),
+		HandshakeOK:       s.handshakeOK.Load(),
+		HandshakeFail:     s.handshakeFail.Load(),
+		HandshakeRejected: s.handshakeRejected.Load(),
+		LastError:         loadStr(&s.lastError),
+		PeerFingerprint:   loadStr(&s.peerFP),
 	}
 	if snap.TunnelConnected {
 		snap.ConnectedSince = time.Unix(0, s.connectedNano.Load())

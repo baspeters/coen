@@ -665,10 +665,15 @@ whole lifecycle.
 `coen status` returns a live snapshot over a local Unix socket and shows role-appropriate
 fields. With a daemon running it auto-detects the role and socket from the host's process
 table, so `coen status` needs no flags; `--socket` or `--role` override it. On the edge it
-lists each connected agent with its source address and fingerprint, plus active and total
-streams, bytes in and out, and handshake counts. On the agent it shows whether the tunnel is
-up and since when, the peer fingerprint, reconnect count, and last error. Add `--json` for
-scripts. If `admin.socket` is unset, the status socket is disabled.
+lists each connected agent with its source address and fingerprint, plus active and peak
+(`max`) concurrent streams, bytes in and out, and handshake counts. Handshakes are split
+three ways: `ok` (authenticated and registered), `fail` (a peer that authenticated but was
+not authorized for any route), and `rejected` (a peer refused at the TLS handshake because it
+presented no client certificate or an incompatible TLS version or cipher). On a public mTLS
+port `rejected` is routine scanner and probe noise that the edge correctly turns away, so it
+is kept separate from `fail`. On the agent `coen status` shows whether the tunnel is up and
+since when, the peer fingerprint, reconnect count, and last error. Add `--json` for scripts.
+If `admin.socket` is unset, the status socket is disabled.
 
 `coen doctor` runs the role-aware preflight described above and exits non-zero if anything
 fails, so it fits into deploy scripts. With a daemon running it auto-detects the role, and

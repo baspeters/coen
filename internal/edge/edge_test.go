@@ -572,7 +572,8 @@ func TestServeAgentFailedHandshakeNoClientCert(t *testing.T) {
 	}()
 
 	// Client presents no certificate; the server requires one and must fail
-	// the handshake.
+	// the handshake. An unauthenticated peer is scanner-class noise, so it is
+	// counted as rejected, not as a fail.
 	clientConn, dialErr := tls.Dial("tcp", tunLn.Addr().String(), &tls.Config{InsecureSkipVerify: true})
 	if dialErr == nil {
 		_ = clientConn.Close()
@@ -587,8 +588,12 @@ func TestServeAgentFailedHandshakeNoClientCert(t *testing.T) {
 	if e.reg.size() != 0 {
 		t.Fatal("session should remain nil after a failed handshake")
 	}
-	if got := e.state.Snapshot().HandshakeFail; got != 1 {
-		t.Fatalf("expected handshake fail counter = 1, got %d", got)
+	snap := e.state.Snapshot()
+	if snap.HandshakeRejected != 1 {
+		t.Fatalf("expected handshake rejected counter = 1, got %d", snap.HandshakeRejected)
+	}
+	if snap.HandshakeFail != 0 {
+		t.Fatalf("an unauthenticated peer must not count as a fail, got %d", snap.HandshakeFail)
 	}
 }
 

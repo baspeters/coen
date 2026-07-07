@@ -36,8 +36,9 @@ func TestServeAgentIncompleteHandshakeNotCountedFail(t *testing.T) {
 		t.Fatal("serveAgent did not return after an incomplete handshake")
 	}
 
-	if got := e.state.Snapshot().HandshakeFail; got != 0 {
-		t.Fatalf("incomplete handshake must not count as a fail, got %d", got)
+	snap := e.state.Snapshot()
+	if snap.HandshakeFail != 0 || snap.HandshakeRejected != 0 {
+		t.Fatalf("incomplete handshake must not count as fail/rejected, got fail=%d rejected=%d", snap.HandshakeFail, snap.HandshakeRejected)
 	}
 	if e.reg.size() != 0 {
 		t.Fatal("no session should be registered")

@@ -171,8 +171,12 @@ func (e *Edge) serveAgent(conn net.Conn) {
 			// probe. Not a real failure, so don't count it or warn.
 			e.log.Debug("agent.tls_handshake", "verify_result", "incomplete", "error", err.Error())
 		} else {
-			e.state.HandshakeFail()
-			e.log.Warn("agent.tls_handshake", "verify_result", "fail", "error", err.Error())
+			// The peer attempted TLS but never authenticated (no client
+			// certificate, or an incompatible TLS version or cipher). On a public
+			// mTLS port this is routine scanner/probe noise: counted as rejected,
+			// not as a failure, and logged at info with its source address.
+			e.state.HandshakeRejected()
+			e.log.Info("agent.tls_handshake", "verify_result", "rejected", "remote_addr", conn.RemoteAddr().String(), "error", err.Error())
 		}
 		_ = conn.Close()
 		return

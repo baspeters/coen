@@ -137,7 +137,10 @@ func renderEdgeStatus(out io.Writer, s obs.Snapshot) {
 	}
 	fmt.Fprintf(out, "streams:    %d active / %d max\n", s.ActiveStreams, s.MaxStreams)
 	fmt.Fprintf(out, "bytes:      %d in / %d out\n", s.BytesIn, s.BytesOut)
-	fmt.Fprintf(out, "handshakes: %d ok / %d fail\n", s.HandshakeOK, s.HandshakeFail)
+	// "rejected" is unauthenticated/incompatible peers refused at the TLS
+	// handshake (routine scanner noise on a public mTLS port); "fail" is a peer
+	// that authenticated but was not authorized for any route.
+	fmt.Fprintf(out, "handshakes: %d ok / %d fail / %d rejected\n", s.HandshakeOK, s.HandshakeFail, s.HandshakeRejected)
 }
 
 func renderAgentStatus(out io.Writer, s obs.Snapshot) {

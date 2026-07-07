@@ -14,9 +14,10 @@ import (
 func TestRenderStatusEdgeOmitsAgentFields(t *testing.T) {
 	var buf bytes.Buffer
 	renderStatus(&buf, obs.Snapshot{
-		Role:        "edge",
-		Agents:      []obs.AgentInfo{{Fingerprint: "SHA256:xyz", RemoteAddr: "198.51.100.7:4444", ConnectedSince: time.Unix(0, 0)}},
-		HandshakeOK: 2,
+		Role:              "edge",
+		Agents:            []obs.AgentInfo{{Fingerprint: "SHA256:xyz", RemoteAddr: "198.51.100.7:4444", ConnectedSince: time.Unix(0, 0)}},
+		HandshakeOK:       2,
+		HandshakeRejected: 22,
 	}, false)
 	s := buf.String()
 	if !strings.Contains(s, "role:       edge") {
@@ -30,8 +31,8 @@ func TestRenderStatusEdgeOmitsAgentFields(t *testing.T) {
 	if strings.Contains(s, "198.51.100.7:4444") {
 		t.Fatalf("agent line should drop the ephemeral source port: %s", s)
 	}
-	if !strings.Contains(s, "handshakes:") {
-		t.Fatalf("missing handshakes: %s", s)
+	if !strings.Contains(s, "handshakes: 2 ok / 0 fail / 22 rejected") {
+		t.Fatalf("edge status should split handshakes into ok/fail/rejected: %s", s)
 	}
 	if strings.Contains(s, "tunnel:") {
 		t.Fatalf("edge status must not show the agent-only tunnel field: %s", s)
