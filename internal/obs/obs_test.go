@@ -127,11 +127,27 @@ func TestStateHandshakeErrorAndDisconnect(t *testing.T) {
 	if snap.TotalStreams != 2 {
 		t.Fatalf("TotalStreams = %d, want 2", snap.TotalStreams)
 	}
+	if snap.MaxStreams != 2 {
+		t.Fatalf("MaxStreams = %d, want 2 (peak concurrency was 2)", snap.MaxStreams)
+	}
 	if snap.ActiveStreams != 1 {
 		t.Fatalf("ActiveStreams = %d, want 1 (one of two streams closed)", snap.ActiveStreams)
 	}
 	if snap.BytesIn != 3 || snap.BytesOut != 4 {
 		t.Fatalf("bytes = in:%d out:%d, want in:3 out:4", snap.BytesIn, snap.BytesOut)
+	}
+
+	// The high-water mark holds once the peak passes and does not rise on a
+	// re-open that stays below it.
+	s.StreamClosed(0, 0) // active 1 -> 0
+	s.StreamOpened()     // active 0 -> 1; below the peak of 2
+	if m := s.Snapshot().MaxStreams; m != 2 {
+		t.Fatalf("MaxStreams = %d, want it to hold at the peak of 2", m)
+	}
+	s.StreamOpened()
+	s.StreamOpened() // active climbs to 3; a new peak
+	if m := s.Snapshot().MaxStreams; m != 3 {
+		t.Fatalf("MaxStreams = %d, want 3 after a new peak", m)
 	}
 
 	s.SetDisconnected()

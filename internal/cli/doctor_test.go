@@ -115,4 +115,8 @@ routes:
 	if !strings.Contains(out, "✗") {
 		t.Fatalf("expected ✗ marks in output, got %q", out)
 	}
+	// The checks are introduced by a role/config header.
+	if !strings.Contains(out, "coen doctor: agent checks (config: "+cfgPath+")") {
+		t.Fatalf("expected a role/config header before the checks, got %q", out)
+	}
 }

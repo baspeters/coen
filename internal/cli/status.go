@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"path/filepath"
 
 	"github.com/baspeters/coen/internal/admin"
@@ -116,16 +117,25 @@ func renderStatus(out io.Writer, snap obs.Snapshot, asJSON bool) {
 	}
 }
 
+// agentIP returns the connecting IP from a remote address, dropping the
+// ephemeral source port. Falls back to the raw value (or "unknown") if it is
+// not a host:port pair.
+func agentIP(remoteAddr string) string {
+	if remoteAddr == "" {
+		return "unknown"
+	}
+	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		return host
+	}
+	return remoteAddr
+}
+
 func renderEdgeStatus(out io.Writer, s obs.Snapshot) {
 	fmt.Fprintf(out, "agents:     %d connected\n", len(s.Agents))
 	for _, a := range s.Agents {
-		addr := a.RemoteAddr
-		if addr == "" {
-			addr = "unknown addr"
-		}
-		fmt.Fprintf(out, "  - %s (%s, since %s)\n", a.Fingerprint, addr, a.ConnectedSince.Format("2006-01-02 15:04:05"))
+		fmt.Fprintf(out, "  %s - %s - %s\n", agentIP(a.RemoteAddr), a.ConnectedSince.Format("2006-01-02 15:04:05"), a.Fingerprint)
 	}
-	fmt.Fprintf(out, "streams:    %d active / %d total\n", s.ActiveStreams, s.TotalStreams)
+	fmt.Fprintf(out, "streams:    %d active / %d max\n", s.ActiveStreams, s.MaxStreams)
 	fmt.Fprintf(out, "bytes:      %d in / %d out\n", s.BytesIn, s.BytesOut)
 	fmt.Fprintf(out, "handshakes: %d ok / %d fail\n", s.HandshakeOK, s.HandshakeFail)
 }
@@ -139,7 +149,7 @@ func renderAgentStatus(out io.Writer, s obs.Snapshot) {
 		fmt.Fprintf(out, "tunnel:     disconnected\n")
 	}
 	fmt.Fprintf(out, "reconnects: %d\n", s.Reconnects)
-	fmt.Fprintf(out, "streams:    %d active / %d total\n", s.ActiveStreams, s.TotalStreams)
+	fmt.Fprintf(out, "streams:    %d active / %d max\n", s.ActiveStreams, s.MaxStreams)
 	fmt.Fprintf(out, "bytes:      %d in / %d out\n", s.BytesIn, s.BytesOut)
 	fmt.Fprintf(out, "handshakes: %d ok / %d fail\n", s.HandshakeOK, s.HandshakeFail)
 }

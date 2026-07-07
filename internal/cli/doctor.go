@@ -59,10 +59,12 @@ func newDoctorCmd() *cobra.Command {
 				b, _ := json.MarshalIndent(results, "", "  ")
 				fmt.Fprintln(out, string(b))
 			} else {
+				color := colorEnabled(out)
+				fmt.Fprintf(out, "coen doctor: %s checks (config: %s)\n\n", role, cfgPath)
 				for _, r := range results {
-					mark := "✓"
+					mark := paint("✓", ansiGreen, color)
 					if !r.OK {
-						mark = "✗"
+						mark = paint("✗", ansiRed, color)
 					}
 					fmt.Fprintf(out, "%s %s — %s\n", mark, r.Name, r.Detail)
 					if !r.OK && r.Hint != "" {

@@ -22,8 +22,13 @@ func TestRenderStatusEdgeOmitsAgentFields(t *testing.T) {
 	if !strings.Contains(s, "role:       edge") {
 		t.Fatalf("missing role line: %s", s)
 	}
-	if !strings.Contains(s, "198.51.100.7:4444") {
-		t.Fatalf("edge status should show the agent source address: %s", s)
+	// Agent line format is "<IP> - <SINCE> - <SHA256>": connecting IP (no
+	// ephemeral port), then connect time, then fingerprint.
+	if !strings.Contains(s, "198.51.100.7 - ") || !strings.Contains(s, " - SHA256:xyz") {
+		t.Fatalf("edge status should show '<IP> - <SINCE> - <SHA256>': %s", s)
+	}
+	if strings.Contains(s, "198.51.100.7:4444") {
+		t.Fatalf("agent line should drop the ephemeral source port: %s", s)
 	}
 	if !strings.Contains(s, "handshakes:") {
 		t.Fatalf("missing handshakes: %s", s)

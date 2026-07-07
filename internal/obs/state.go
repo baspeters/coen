@@ -13,6 +13,7 @@ type State struct {
 	connectedNano atomic.Int64
 	activeStreams atomic.Int64
 	totalStreams  atomic.Int64
+	maxStreams    atomic.Int64 // high-water mark of concurrent streams
 	bytesIn       atomic.Int64
 	bytesOut      atomic.Int64
 	reconnects    atomic.Int64
@@ -70,7 +71,17 @@ func (s *State) SetDisconnected() {
 	s.connected.Store(false)
 	s.peerFP.Store("") // don't report a stale peer fingerprint once disconnected
 }
-func (s *State) StreamOpened() { s.activeStreams.Add(1); s.totalStreams.Add(1) }
+func (s *State) StreamOpened() {
+	n := s.activeStreams.Add(1)
+	s.totalStreams.Add(1)
+	// Raise the concurrency high-water mark if this open set a new peak.
+	for {
+		m := s.maxStreams.Load()
+		if n <= m || s.maxStreams.CompareAndSwap(m, n) {
+			break
+		}
+	}
+}
 func (s *State) StreamClosed(in, out int64) {
 	s.activeStreams.Add(-1)
 	s.bytesIn.Add(in)
@@ -86,6 +97,7 @@ type Snapshot struct {
 	TunnelConnected bool        `json:"tunnel_connected"`
 	ConnectedSince  time.Time   `json:"connected_since,omitzero"`
 	ActiveStreams   int64       `json:"active_streams"`
+	MaxStreams      int64       `json:"max_streams"`
 	TotalStreams    int64       `json:"total_streams"`
 	BytesIn         int64       `json:"bytes_in"`
 	BytesOut        int64       `json:"bytes_out"`
@@ -109,6 +121,7 @@ func (s *State) Snapshot() Snapshot {
 		Role:            s.role,
 		TunnelConnected: s.connected.Load(),
 		ActiveStreams:   s.activeStreams.Load(),
+		MaxStreams:      s.maxStreams.Load(),
 		TotalStreams:    s.totalStreams.Load(),
 		BytesIn:         s.bytesIn.Load(),
 		BytesOut:        s.bytesOut.Load(),
