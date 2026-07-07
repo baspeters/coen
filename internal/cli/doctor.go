@@ -66,7 +66,7 @@ func newDoctorCmd() *cobra.Command {
 					if !r.OK {
 						mark = paint("✗", ansiRed, color)
 					}
-					fmt.Fprintf(out, "%s %s — %s\n", mark, r.Name, r.Detail)
+					fmt.Fprintf(out, "%s %s - %s\n", mark, r.Name, r.Detail)
 					if !r.OK && r.Hint != "" {
 						fmt.Fprintf(out, "    hint: %s\n", r.Hint)
 					}
