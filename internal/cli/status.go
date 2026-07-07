@@ -133,7 +133,7 @@ func agentIP(remoteAddr string) string {
 func renderEdgeStatus(out io.Writer, s obs.Snapshot) {
 	fmt.Fprintf(out, "agents:     %d connected\n", len(s.Agents))
 	for _, a := range s.Agents {
-		fmt.Fprintf(out, "  %s - %s - %s\n", agentIP(a.RemoteAddr), a.ConnectedSince.Format("2006-01-02 15:04:05"), a.Fingerprint)
+		fmt.Fprintf(out, "  - %s (%s, %s)\n", agentIP(a.RemoteAddr), a.ConnectedSince.Format("2006-01-02 15:04:05"), a.Fingerprint)
 	}
 	fmt.Fprintf(out, "streams:    %d active / %d max\n", s.ActiveStreams, s.MaxStreams)
 	fmt.Fprintf(out, "bytes:      %d in / %d out\n", s.BytesIn, s.BytesOut)
