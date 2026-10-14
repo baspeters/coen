@@ -34,7 +34,7 @@ func testEdge(st *obs.State, rs *routeState) *Edge {
 // port scan) is not a malformed request: no 400, no bad_request count.
 func TestHandleIngressEmptyConnectionNotCounted(t *testing.T) {
 	st := obs.NewState("edge")
-	e := testEdge(st, &routeState{fingerprint: "FP", stats: st.Route("*")})
+	e := testEdge(st, &routeState{fingerprints: []string{"FP"}, stats: st.Route("*")})
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +68,7 @@ func TestHandleIngressEmptyConnectionNotCounted(t *testing.T) {
 // no bad_request. A partial head that stalls is (see TestReadHeaderTimeout).
 func TestHandleIngressIdleClientIsCutOffQuietly(t *testing.T) {
 	st := obs.NewState("edge")
-	e := testEdge(st, &routeState{fingerprint: "FP"})
+	e := testEdge(st, &routeState{fingerprints: []string{"FP"}})
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -107,12 +107,12 @@ func TestHandleIngressPreambleFailureReturns502(t *testing.T) {
 	srv, cli := newServerSession(t)
 	defer cli.Close()
 	st := obs.NewState("edge")
-	rs := &routeState{fingerprint: "FP", stats: st.Route("*")}
+	rs := &routeState{fingerprints: []string{"FP"}, stats: st.Route("*")}
 	e := testEdge(st, rs)
 	if !e.reg.register("FP", srv) {
 		t.Fatal("register failed")
 	}
-	// A Host longer than the preamble limit makes WritePreamble fail.
+	// A Host longer than the preamble limit makes EncodePreamble fail.
 	host := strings.Repeat("a", 5000) + ".example.com"
 	client, edgeConn := net.Pipe()
 	go e.handleIngress(edgeConn)
@@ -159,7 +159,7 @@ func TestHandleIngressTLSHandshakeFailureIsBadRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := obs.NewState("edge")
-	e := testEdge(st, &routeState{fingerprint: "FP"})
+	e := testEdge(st, &routeState{fingerprints: []string{"FP"}})
 	client, edgeConn := net.Pipe()
 	done := make(chan struct{})
 	go func() {
@@ -260,7 +260,7 @@ func TestStandaloneIngressEmptyVersusAbandonedHandshake(t *testing.T) {
 	defer ln.Close()
 
 	st := obs.NewState("edge")
-	e := testEdge(st, &routeState{fingerprint: "FP"})
+	e := testEdge(st, &routeState{fingerprints: []string{"FP"}})
 	handled := make(chan struct{}, 2)
 	go func() {
 		for {
@@ -381,7 +381,7 @@ func TestPreambleFailureEvictsOnlyDeadSession(t *testing.T) {
 	srv, cli := newServerSession(t)
 	defer cli.Close()
 	st := obs.NewState("edge")
-	e := testEdge(st, &routeState{fingerprint: "FP", stats: st.Route("*")})
+	e := testEdge(st, &routeState{fingerprints: []string{"FP"}, stats: st.Route("*")})
 	if !e.reg.register("FP", srv) {
 		t.Fatal("register failed")
 	}
@@ -397,7 +397,7 @@ func TestPreambleFailureEvictsOnlyDeadSession(t *testing.T) {
 	// Shut the session down so the next write fails because the tunnel is gone.
 	_ = srv.Close()
 	_ = cli.Close()
-	e.evict("FP", srv)
+	e.evict(&agentConn{fp: "FP", sess: srv})
 	if _, ok := e.reg.get("FP"); ok {
 		t.Fatal("evict must remove the dead session")
 	}
@@ -440,7 +440,7 @@ func TestMaxConnectionsRejectionIsBoundedOnTLS(t *testing.T) {
 	certPEM, keyPEM, _ := ca.IssueServer("app.example.com")
 	cert, _ := tls.X509KeyPair(certPEM, keyPEM)
 	st := obs.NewState("edge")
-	e := testEdge(st, &routeState{fingerprint: "FP"})
+	e := testEdge(st, &routeState{fingerprints: []string{"FP"}})
 	e.sem = newSemaphore(1)
 	if !e.sem.tryAcquire() { // the cap is already full
 		t.Fatal("acquire")

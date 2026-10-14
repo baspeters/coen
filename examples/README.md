@@ -10,7 +10,7 @@ real values for your hosts. Generate PKI and read fingerprints with `coen cert`,
 and validate a config with `coen doctor`.
 
 Host ownership is edge-authoritative: the edge maps each host pattern to the
-agent (by client-cert fingerprint) that owns it, and the fingerprint allowlist is
+agent or agents (by client-cert fingerprint) that serve it, and the fingerprint allowlist is
 derived from the routes. An agent maps the same host patterns to its local
 backends.
 
@@ -24,6 +24,7 @@ backends.
 | [06-hardening-and-limits](06-hardening-and-limits/) | standalone | connection caps, idle deadline, per-route caps, draining |
 | [07-proxied-multi-host-tls](07-proxied-multi-host-tls/) | proxied | nginx SNI and per-host certs in front of a multi-agent edge |
 | [08-prometheus-metrics](08-prometheus-metrics/) | standalone | the opt-in `/metrics` endpoint on edge and agent, with a scrape config |
+| [09-load-balancing](09-load-balancing/) | standalone | several agents per host, by separate or shared certificates, with failover |
 
 ## Route matching
 

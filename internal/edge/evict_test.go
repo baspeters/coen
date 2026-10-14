@@ -10,6 +10,7 @@ import (
 
 	"github.com/baspeters/coen/internal/config"
 	"github.com/baspeters/coen/internal/obs"
+	"github.com/baspeters/coen/internal/obs/obstest"
 	"github.com/baspeters/coen/internal/route"
 )
 
@@ -24,13 +25,13 @@ func TestHandleIngressEvictsDeadSessionOnOpenStreamFailure(t *testing.T) {
 		state: &obs.State{},
 		reg:   newRegistry(),
 		routes: route.Build([]route.Entry[*routeState]{
-			{Pattern: "app.example.com", Value: &routeState{fingerprint: "FP-A"}},
+			{Pattern: "app.example.com", Value: &routeState{fingerprints: []string{"FP-A"}}},
 		}),
 	}
 	if !e.reg.register("FP-A", srv) {
 		t.Fatal("register should succeed on an empty registry")
 	}
-	e.state.AgentConnected("FP-A", "203.0.113.7:5555")
+	obstest.ConnectAgent(e.state, "FP-A", "203.0.113.7:5555")
 
 	// Kill the session so OpenStream fails, as on a silent partition.
 	_ = cli.Close()

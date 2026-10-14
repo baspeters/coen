@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,7 +29,7 @@ func TestHandleStreamPreambleClassification(t *testing.T) {
 		t.Helper()
 		edgeSide, agentSide := net.Pipe()
 		done := make(chan struct{})
-		go func() { a.handleStream(context.Background(), agentSide); close(done) }()
+		go func() { a.handleStream(context.Background(), agentSide, false); close(done) }()
 		feed(edgeSide)
 		select {
 		case <-done:
@@ -99,8 +100,8 @@ func TestHandleStreamDialSurvivesShutdownSignal(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // shutdown already signalled when the stream is handled
 	edgeSide, agentSide := net.Pipe()
-	go a.handleStream(ctx, agentSide)
-	if err := tunnel.WritePreamble(edgeSide, tunnel.Preamble{ConnID: "c", Host: "app"}); err != nil {
+	go a.handleStream(ctx, agentSide, false)
+	if err := writePreamble(edgeSide, tunnel.Preamble{ConnID: "c", Host: "app"}); err != nil {
 		t.Fatal(err)
 	}
 	_ = edgeSide.SetReadDeadline(time.Now().Add(3 * time.Second))
@@ -110,5 +111,24 @@ func TestHandleStreamDialSurvivesShutdownSignal(t *testing.T) {
 	}
 	if got := st.Detail().Routes[0].Failures.Get(obs.ReasonDialError); got != 0 {
 		t.Fatalf("dial_error = %d, want 0", got)
+	}
+}
+
+// With version 2 the agent accepts a stream on arrival, before reading its
+// preamble, and the accept byte is the first thing on it, even when the agent
+// then answers with an error page.
+func TestHandleStreamAcceptsOnArrival(t *testing.T) {
+	a := &Agent{log: slog.New(slog.NewTextHandler(io.Discard, nil)), state: obs.NewState("agent"), routes: route.Build[agentRoute](nil)}
+	edgeSide, agentSide := net.Pipe()
+	done := make(chan struct{})
+	go func() { a.handleStream(context.Background(), agentSide, true); close(done) }()
+	if err := tunnel.AwaitAccept(edgeSide, 2*time.Second); err != nil {
+		t.Fatalf("no accept byte on arrival: %v", err)
+	}
+	_ = writePreamble(edgeSide, tunnel.Preamble{ConnID: "c", Host: "nowhere"})
+	rest, _ := io.ReadAll(edgeSide)
+	<-done
+	if !strings.Contains(string(rest), "502") {
+		t.Fatalf("the error page must follow the accept byte, got %q", rest)
 	}
 }

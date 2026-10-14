@@ -20,21 +20,22 @@ type Preamble struct {
 
 const maxPreamble = 4096
 
-func WritePreamble(w io.Writer, p Preamble) error {
+// EncodePreamble returns p framed for the wire (a 2-byte length, then JSON),
+// or an error before anything is sent if it is too large. Callers send the
+// frame in one write, so a stream cut mid-way never leaves a lone length
+// prefix that the reader would take for a truncated header.
+func EncodePreamble(p Preamble) ([]byte, error) {
 	b, err := json.Marshal(p)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(b) > maxPreamble {
-		return fmt.Errorf("preamble too large: %d bytes", len(b))
+		return nil, fmt.Errorf("preamble too large: %d bytes", len(b))
 	}
-	// One write for prefix and body, so a stream cut mid-way never leaves a
-	// lone length prefix that the reader would take for a truncated header.
 	frame := make([]byte, 2+len(b))
 	binary.BigEndian.PutUint16(frame[:2], uint16(len(b)))
 	copy(frame[2:], b)
-	_, err = w.Write(frame)
-	return err
+	return frame, nil
 }
 
 func ReadPreamble(r io.Reader) (Preamble, error) {

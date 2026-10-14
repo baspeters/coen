@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/baspeters/coen/internal/obs"
+	"github.com/baspeters/coen/internal/obs/obstest"
 )
 
 func render(t *testing.T, s *obs.State) string {
@@ -26,7 +27,11 @@ func TestCollectEdge(t *testing.T) {
 	app := s.Route("app.example.com")
 	s.Route("*.example.com")
 	s.ExpectAgents(map[string]bool{"SHA256:aaa": true, "SHA256:bbb": true})
-	s.AgentConnected("SHA256:aaa", "203.0.113.1:5000")
+	agentA := obstest.ConnectAgent(s, "SHA256:aaa", "203.0.113.1:5000")
+	obstest.ConnectAgent(s, "SHA256:aaa", "203.0.113.9:5000")               // a second session (shared cert)
+	obstest.ConnectAgent(s, "SHA256:bbb", "203.0.113.7:5000").SetDraining() // draining: not serving
+	agentA.Reserve()
+	agentA.Commit()
 	s.HandshakeOK()
 	s.HandshakeRejected()
 	s.HandshakeDuplicate()
@@ -53,8 +58,14 @@ func TestCollectEdge(t *testing.T) {
 		`coen_tunnel_handshakes_total{result="fail"} 0`,
 		`coen_tunnel_handshakes_total{result="rejected"} 1`,
 		`coen_tunnel_handshakes_total{result="duplicate"} 1`,
+		`coen_tunnel_handshakes_total{result="capped"} 0`,
 		`coen_agent_connected{fingerprint="SHA256:aaa"} 1`,
-		`coen_agent_connected{fingerprint="SHA256:bbb"} 0`,
+		`coen_agent_connected{fingerprint="SHA256:bbb"} 1`, // draining still counts as connected
+		`coen_agent_sessions{fingerprint="SHA256:aaa"} 2`,
+		`coen_agent_sessions{fingerprint="SHA256:bbb"} 0`,
+		`coen_agent_streams_active{fingerprint="SHA256:aaa"} 1`,
+		`coen_agent_streams_total{fingerprint="SHA256:aaa"} 1`,
+		`coen_agent_streams_total{fingerprint="SHA256:bbb"} 0`,
 		`coen_ingress_rejected_total{reason="no_route"} 2`,
 		`coen_ingress_header_timeouts_total 1`,
 		`coen_ingress_rejected_total{reason="bad_request"} 0`,
