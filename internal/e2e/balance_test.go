@@ -234,7 +234,27 @@ func TestEndToEndLeastConn(t *testing.T) {
 		t.Fatalf("upgrade: %v %v", resp, err)
 	}
 	busy := resp.Header.Get("X-Backend")
+	// Only the WebSocket open: a finished request's stream can still be
+	// counted for a moment after its client has the whole response, and a
+	// tie may go either way.
+	settled := func() {
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			var open int64
+			for _, a := range st.edge.Snapshot().Agents {
+				open += a.ActiveStreams
+			}
+			if open == 1 {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("open streams = %d, want only the WebSocket", open)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
 	for i := 0; i < 10; i++ {
+		settled()
 		if got := get(t, st.addr); got == busy || got == "" {
 			t.Fatalf("request %d went to the busy agent %q (got %q)", i, busy, got)
 		}
