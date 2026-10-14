@@ -21,6 +21,11 @@ type Server struct {
 	SetLevel func(slog.Level) error
 	// Timeout bounds a single server-side request; zero uses defaultHandleTimeout.
 	Timeout time.Duration
+	// LockWait bounds how long the socket-path lock is waited for; zero uses
+	// defaultLockWait.
+	LockWait time.Duration
+	// Log, when set, receives warnings (for example a contended socket lock).
+	Log *slog.Logger
 }
 
 // defaultHandleTimeout bounds how long a single admin request (server side) or
@@ -32,6 +37,16 @@ const defaultHandleTimeout = 5 * time.Second
 // buffering by never sending a newline.
 const maxRequestBytes = 4 << 10
 
+// defaultLockWait bounds the socket-path lock wait (see lockSocketPath).
+const defaultLockWait = 2 * time.Second
+
+func (s *Server) lockWait() time.Duration {
+	if s.LockWait > 0 {
+		return s.LockWait
+	}
+	return defaultLockWait
+}
+
 func (s *Server) reqTimeout() time.Duration {
 	if s.Timeout > 0 {
 		return s.Timeout
@@ -40,31 +55,73 @@ func (s *Server) reqTimeout() time.Duration {
 }
 
 func (s *Server) Serve(ctx context.Context, socketPath string) error {
+	unlock, state := lockSocketPath(socketPath, s.lockWait())
+	if state == lockContended && s.Log != nil {
+		// Another process held the lock past the wait (a stuck daemon busy
+		// with this path). Starting matters more; say so, since that process
+		// could still remove the socket we are about to create.
+		s.Log.Warn("admin.socket_lock_contended", "socket", socketPath, "wait", s.lockWait().String())
+	}
 	_ = os.Remove(socketPath)
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
+		unlock()
 		return fmt.Errorf("admin listen: %w", err)
+	}
+	// Record which file is ours right after creating it: a newer daemon may
+	// replace the path while this one is still draining, and its socket must
+	// survive our exit. The listener would unlink the path on Close
+	// regardless, so turn that off; cleanup removes it only while it is ours.
+	// If the path cannot be stat'ed, ownership cannot be proven later, so the
+	// socket is left in place on exit rather than risk removing a newer
+	// daemon's.
+	ours, _ := os.Stat(socketPath)
+	unlock()
+	if ul, ok := ln.(*net.UnixListener); ok {
+		ul.SetUnlinkOnClose(false)
+	}
+	cleanup := func() {
+		_ = ln.Close()
+		// Under the same lock a newer daemon holds while it replaces the
+		// path, so the check and the remove cannot straddle its Listen. If
+		// another process holds the lock, it is working on the path: leave
+		// the socket rather than guess. Without locking at all, proceed with
+		// the ownership check alone.
+		unlock, state := lockSocketPath(socketPath, s.lockWait())
+		defer unlock()
+		if state == lockContended {
+			return
+		}
+		if cur, err := os.Stat(socketPath); err == nil && ours != nil && os.SameFile(ours, cur) {
+			_ = os.Remove(socketPath)
+		}
 	}
 	// Restrict the control socket to its owner; do not rely on umask or the
 	// systemd unit's directory mode as the security boundary.
 	if err := os.Chmod(socketPath, 0o600); err != nil {
-		_ = ln.Close()
+		cleanup()
 		return fmt.Errorf("admin chmod: %w", err)
 	}
+	// Every return path runs cleanup, which removes the socket while it is
+	// provably ours (identified at creation and still in place, checked under
+	// the lock). Otherwise it is left, and a later daemon replaces it on start.
+	defer cleanup()
+	stop := make(chan struct{})
+	defer close(stop)
 	go func() {
-		<-ctx.Done()
-		_ = ln.Close()
-		_ = os.Remove(socketPath)
+		select {
+		case <-ctx.Done():
+			_ = ln.Close()
+		case <-stop:
+		}
 	}()
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			select {
-			case <-ctx.Done():
+			if ctx.Err() != nil {
 				return nil
-			default:
-				return err
 			}
+			return err
 		}
 		go s.handle(conn)
 	}

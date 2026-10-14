@@ -1,0 +1,18 @@
+ingress:
+  mode: standalone
+  listen: ":443"
+  tls:
+    cert: /etc/coen/certs/public.crt
+    key:  /etc/coen/certs/public.key
+tunnel:
+  listen: ":2636"
+  ca:   /etc/coen/pki/ca.crt
+  cert: /etc/coen/pki/edge.crt
+  key:  /etc/coen/pki/edge.key
+routes:
+  - host: app.example.com
+    agent_fingerprint: "REPLACE_WITH_AGENT_FINGERPRINT"
+  - host: api.example.com
+    agent_fingerprint: "REPLACE_WITH_AGENT_FINGERPRINT"
+metrics:
+  listen: 127.0.0.1:9464      # GET /metrics; loopback only, scraped by a local Prometheus

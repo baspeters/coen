@@ -14,18 +14,25 @@ type State struct {
 	activeStreams     atomic.Int64
 	totalStreams      atomic.Int64
 	maxStreams        atomic.Int64 // high-water mark of concurrent streams
-	bytesIn           atomic.Int64
-	bytesOut          atomic.Int64
 	reconnects        atomic.Int64
 	handshakeOK       atomic.Int64
 	handshakeFail     atomic.Int64
 	handshakeRejected atomic.Int64 // edge: unauthenticated/incompatible peers refused at TLS
+	handshakeDup      atomic.Int64 // edge: authenticated agents refused as a duplicate fingerprint
 	lastError         atomic.Value // string
 	peerFP            atomic.Value // string
 	selfFP            atomic.Value // string: this daemon's own certificate fingerprint
 
 	agentsMu sync.Mutex
 	agents   map[string]agentEntry // edge: connected agents by fingerprint
+	expected map[string]bool       // edge: agent fingerprints the config allows
+
+	routesMu       sync.Mutex
+	routes         map[string]*RouteStats // per configured route pattern
+	unrouted       reasonCounts           // failures not attributable to a route
+	headerTimeouts atomic.Int64           // edge: idle connections cut off at the read-header deadline
+	draining       atomic.Bool            // shutdown has started; in-flight streams are draining
+	started        time.Time
 }
 
 // agentEntry is the per-agent info the edge tracks for a connected tunnel.
@@ -34,8 +41,16 @@ type agentEntry struct {
 	addr  string
 }
 
+// SetDraining records that shutdown has started. A starting replacement reads
+// it (through the metrics endpoint) to tell a draining predecessor from a
+// second live instance holding the same port.
+func (s *State) SetDraining() { s.draining.Store(true) }
+
+// Role returns the daemon role this State was created with.
+func (s *State) Role() string { return s.role }
+
 // NewState returns a State tagged with the daemon's role ("edge" or "agent").
-func NewState(role string) *State { return &State{role: role} }
+func NewState(role string) *State { return &State{role: role, started: time.Now()} }
 
 // AgentConnected records a live edge<-agent tunnel keyed by fingerprint, with
 // the agent's remote address.
@@ -73,7 +88,11 @@ func (s *State) SetDisconnected() {
 	s.connected.Store(false)
 	s.peerFP.Store("") // don't report a stale peer fingerprint once disconnected
 }
-func (s *State) StreamOpened() {
+
+// StreamOpened counts a newly opened stream, globally and, when r is non-nil,
+// on its route. One call records both, so the two views cannot drift apart.
+func (s *State) StreamOpened(r *RouteStats) {
+	r.opened()
 	n := s.activeStreams.Add(1)
 	s.totalStreams.Add(1)
 	// Raise the concurrency high-water mark if this open set a new peak.
@@ -84,10 +103,11 @@ func (s *State) StreamOpened() {
 		}
 	}
 }
-func (s *State) StreamClosed(in, out int64) {
+
+// StreamClosed records that a stream ended, globally and on r when non-nil.
+func (s *State) StreamClosed(r *RouteStats) {
+	r.closed()
 	s.activeStreams.Add(-1)
-	s.bytesIn.Add(in)
-	s.bytesOut.Add(out)
 }
 func (s *State) Reconnect()     { s.reconnects.Add(1) }
 func (s *State) HandshakeOK()   { s.handshakeOK.Add(1) }
@@ -98,7 +118,12 @@ func (s *State) HandshakeFail() { s.handshakeFail.Add(1) }
 // cipher). On a public mTLS port this is routine scanner/probe noise, kept
 // separate from HandshakeFail so it does not look like an agent problem.
 func (s *State) HandshakeRejected() { s.handshakeRejected.Add(1) }
-func (s *State) SetError(e string)  { s.lastError.Store(e) }
+
+// HandshakeDuplicate counts an authenticated agent refused because a live
+// session already owns its fingerprint (a cloned certificate, or a stray
+// reconnect racing the old session).
+func (s *State) HandshakeDuplicate() { s.handshakeDup.Add(1) }
+func (s *State) SetError(e string)   { s.lastError.Store(e) }
 
 // SetSelfFingerprint records this daemon's own certificate fingerprint, set
 // once at startup. It lets an operator cross-check the two ends: the agent's
@@ -119,6 +144,7 @@ type Snapshot struct {
 	HandshakeOK       int64       `json:"handshake_ok"`
 	HandshakeFail     int64       `json:"handshake_fail"`
 	HandshakeRejected int64       `json:"handshake_rejected"`
+	HandshakeDup      int64       `json:"handshake_duplicate"`
 	LastError         string      `json:"last_error,omitempty"`
 	SelfFingerprint   string      `json:"self_fingerprint,omitempty"`
 	PeerFingerprint   string      `json:"peer_fingerprint,omitempty"`
@@ -132,25 +158,33 @@ func loadStr(v *atomic.Value) string {
 	return ""
 }
 
-func (s *State) Snapshot() Snapshot {
+// Snapshot returns the status view of the counters.
+func (s *State) Snapshot() Snapshot { return s.snapshot(s.routeSnapshots()) }
+
+// snapshot builds a Snapshot, taking byte totals from the given route copies
+// (bytes are counted only per route, in the data path).
+func (s *State) snapshot(routes []RouteSnapshot) Snapshot {
 	snap := Snapshot{
 		Role:              s.role,
 		TunnelConnected:   s.connected.Load(),
 		ActiveStreams:     s.activeStreams.Load(),
 		MaxStreams:        s.maxStreams.Load(),
 		TotalStreams:      s.totalStreams.Load(),
-		BytesIn:           s.bytesIn.Load(),
-		BytesOut:          s.bytesOut.Load(),
 		Reconnects:        s.reconnects.Load(),
 		HandshakeOK:       s.handshakeOK.Load(),
 		HandshakeFail:     s.handshakeFail.Load(),
 		HandshakeRejected: s.handshakeRejected.Load(),
+		HandshakeDup:      s.handshakeDup.Load(),
 		LastError:         loadStr(&s.lastError),
 		SelfFingerprint:   loadStr(&s.selfFP),
 		PeerFingerprint:   loadStr(&s.peerFP),
 	}
 	if snap.TunnelConnected {
 		snap.ConnectedSince = time.Unix(0, s.connectedNano.Load())
+	}
+	for _, r := range routes {
+		snap.BytesIn += r.BytesIn
+		snap.BytesOut += r.BytesOut
 	}
 	s.agentsMu.Lock()
 	for fp, e := range s.agents {

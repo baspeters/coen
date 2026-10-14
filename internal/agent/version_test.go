@@ -20,7 +20,7 @@ func newVersionTestAgent(t *testing.T, agentVersion string, buf *bytes.Buffer) *
 		version: agentVersion,
 		log:     slog.New(slog.NewTextHandler(buf, nil)),
 		state:   &obs.State{},
-		routes:  route.Build([]route.Entry[string]{{Pattern: "*", Value: "127.0.0.1:1"}}),
+		routes:  route.Build([]route.Entry[agentRoute]{{Pattern: "*", Value: agentRoute{service: "127.0.0.1:1"}}}),
 	}
 }
 

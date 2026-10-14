@@ -1,0 +1,12 @@
+edge:
+  address: edge.example.com:2636
+  ca:   /etc/coen/pki/ca.crt
+  cert: /etc/coen/pki/agent.crt
+  key:  /etc/coen/pki/agent.key
+routes:
+  - host: app.example.com
+    service: 127.0.0.1:8080
+  - host: api.example.com
+    service: 127.0.0.1:9000
+metrics:
+  listen: 127.0.0.1:9465      # a different port, so edge and agent can share a host

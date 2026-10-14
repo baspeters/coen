@@ -19,13 +19,20 @@ import (
 	"github.com/baspeters/coen/internal/tunnel"
 )
 
+// agentRoute is the per-route value stored in the matcher: the backend address
+// and the route's counters (nil-safe).
+type agentRoute struct {
+	service string
+	stats   *obs.RouteStats
+}
+
 type Agent struct {
 	cfg     *config.AgentConfig
 	log     *slog.Logger
 	state   *obs.State
 	tlsCfg  *tls.Config
-	routes  *route.Matcher[string] // host -> local backend service address
-	version string                 // build version, for edge/agent skew detection
+	routes  *route.Matcher[agentRoute] // host -> local backend service and its counters
+	version string                     // build version, for edge/agent skew detection
 
 	mu          sync.Mutex
 	draining    bool
@@ -54,9 +61,9 @@ func New(cfg *config.AgentConfig, log *slog.Logger, state *obs.State) (*Agent, e
 	if cert.Leaf != nil {
 		state.SetSelfFingerprint(pki.Fingerprint(cert.Leaf))
 	}
-	entries := make([]route.Entry[string], 0, len(cfg.Routes))
+	entries := make([]route.Entry[agentRoute], 0, len(cfg.Routes))
 	for _, r := range cfg.Routes {
-		entries = append(entries, route.Entry[string]{Pattern: r.Host, Value: r.Service})
+		entries = append(entries, route.Entry[agentRoute]{Pattern: r.Host, Value: agentRoute{service: r.Service, stats: state.Route(route.Normalize(r.Host))}})
 	}
 	return &Agent{cfg: cfg, log: log, state: state, tlsCfg: tunnel.ClientTLSConfig(pool, cert, host), routes: route.Build(entries), version: cfg.Version}, nil
 }
@@ -174,6 +181,13 @@ func (a *Agent) handleStream(ctx context.Context, stream net.Conn) {
 	_ = stream.SetReadDeadline(time.Now().Add(preambleReadTimeout))
 	p, err := tunnel.ReadPreamble(stream)
 	if err != nil {
+		if tunnel.IsTeardown(err) {
+			// The stream or session closed before a preamble arrived, as on a
+			// routine edge restart. Not a protocol fault, so not counted.
+			a.log.Debug("stream.closed_before_preamble", "error", err.Error())
+			return
+		}
+		a.state.Failure(obs.ReasonPreambleError)
 		a.log.Warn("stream.preamble_error", "error", err.Error())
 		return
 	}
@@ -186,23 +200,30 @@ func (a *Agent) handleStream(ctx context.Context, stream net.Conn) {
 			log.Warn("version.mismatch", "edge_version", p.EdgeVersion, "agent_version", a.version)
 		})
 	}
-	svcAddr, ok := a.routes.Match(p.Host)
+	rt, ok := a.routes.Match(p.Host)
 	if !ok {
+		a.state.Failure(obs.ReasonNoRoute)
 		log.Warn("stream.no_route", "host", p.Host)
 		errpage.Write(stream, 502, "Bad Gateway", "No backend for host", p.ConnID)
 		return
 	}
 	log.Debug("stream.accept")
-	svc, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", svcAddr)
+	svcAddr := rt.service
+	// The dial is part of an accepted, in-flight stream, so a shutdown signal
+	// must not cancel it: the drain lets it finish (bounded by the dial timeout
+	// and drain_timeout) instead of failing a healthy backend as dial_error.
+	svc, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(context.WithoutCancel(ctx), "tcp", svcAddr)
 	if err != nil {
+		rt.stats.Failure(obs.ReasonDialError)
 		log.Error("service.dial_error", "address", svcAddr, "error", err.Error())
 		errpage.Write(stream, 502, "Bad Gateway", "Backend unreachable", p.ConnID)
 		return
 	}
-	a.state.StreamOpened()
+	a.state.StreamOpened(rt.stats)
+	sb := rt.stats.Bytes()
 	log.Debug("service.dial", "address", svcAddr)
-	in, out, _ := proxy.Pipe(stream, svc)
-	a.state.StreamClosed(in, out)
+	in, out, _ := proxy.PipeProgress(stream, svc, sb.AddIn, sb.AddOut)
+	a.state.StreamClosed(rt.stats)
 	log.Debug("stream.closed", "bytes_in", in, "bytes_out", out)
 }
 
