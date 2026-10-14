@@ -68,9 +68,12 @@ file, and no third party in the data path.
 - Mutual authentication. The tunnel is TLS 1.3 with client-certificate auth and an Ed25519
   CA. You add or remove an agent by issuing or revoking a certificate; there is no shared
   password to leak.
-- Host-based routing across many agents. One edge can front many hostnames and many agents.
-  Each hostname is owned by exactly one agent, matched by its client-certificate fingerprint.
-  Routes live inline in the config or in `.d` drop-in files.
+- Host-based routing across many agents. One edge can front many hostnames and many agents,
+  matched by their client-certificate fingerprints. Routes live inline in the config or in
+  `.d` drop-in files.
+- Load balancing. A hostname can be served by several agents, each with its own certificate
+  or sharing one, with least-connections or round-robin balancing and automatic failover to
+  the remaining agents when one goes away.
 - HTTPS and WebSocket. The edge reads each request's `Host` header to pick a route, then pipes
   the connection through unchanged, so `Upgrade` handshakes and long-lived sockets work.
 - Two ingress modes. The edge can terminate TLS itself with your PEM certificate, or run
@@ -483,10 +486,14 @@ tunnel:
   ca:   /etc/coen/pki/ca.crt
   cert: /etc/coen/pki/edge.crt
   key:  /etc/coen/pki/edge.key
-routes:                     # host -> owning agent (by client-cert fingerprint)
+routes:                     # host -> owning agent(s) (by client-cert fingerprint)
   - host: app.example.com   # exact, "*.example.com" wildcard, or "*" default
     agent_fingerprint: "SHA256:..."
     max_connections: 0      # optional per-route cap; 0 = unlimited
+  - host: api.example.com   # load-balanced across several agents
+    agent_fingerprints: ["SHA256:...", "SHA256:..."]
+    balance: least_conn     # least_conn (default) or round_robin
+    allow_shared_cert: false # true: several agents may run with one certificate
 drain_timeout: 15s          # finish in-flight streams up to this long on shutdown
 log:
   level: info               # trace, debug, info, warn, or error
@@ -510,7 +517,10 @@ metrics:                    # optional; unset disables the endpoint
 | `tunnel.cert`, `tunnel.key` | path | required | The edge's server certificate and key for the tunnel. |
 | `routes` | list | at least one | Host ownership; see [Host routing](#host-routing-and-matching). May be split into `edge.d/`. |
 | `routes[].host` | string | required | Match pattern: an exact host, a `*.suffix` wildcard, or `*` (default). |
-| `routes[].agent_fingerprint` | string | required | `SHA256:...` fingerprint of the agent that owns this host; `coen cert agent` prints it. The set of these values is the connection allowlist. |
+| `routes[].agent_fingerprint` | string | one of the two | `SHA256:...` fingerprint of the agent that owns this host; `coen cert agent` prints it. The set of all route fingerprints is the connection allowlist. |
+| `routes[].agent_fingerprints` | list | one of the two | Several agent fingerprints for a load-balanced host; see [Load balancing](#load-balancing). Use this or `agent_fingerprint`, not both. |
+| `routes[].balance` | string | `least_conn` | How connections are spread across the route's live agent sessions: `least_conn` (fewest open streams) or `round_robin`. |
+| `routes[].allow_shared_cert` | bool | `false` | Let several agents run with the same certificate, each as its own session. Must be set the same way on every route that names that fingerprint. |
 | `routes[].max_connections` | int | `0` | Per-route cap on concurrent connections; over it the edge returns `503`. `0` means unlimited. |
 | `drain_timeout` | duration | `15s` | On shutdown, finish in-flight streams for up to this long before force-closing. `0` or unset uses the default (15s). |
 | `log.level` | string | `info` | `trace`, `debug`, `info`, `warn`, or `error`. |
@@ -574,10 +584,11 @@ Precedence is:
    most specific match, that is the longest suffix, wins.
 3. **Default** `*`, if present, matches anything else.
 
-The matched edge route names the owning agent's fingerprint. The edge finds that agent's live
-session, opens a stream, and forwards the request with the `Host` in the preamble; the agent
-matches the same `Host` against its own `routes` and dials the backend. Both ends must agree on
-the host patterns.
+The matched edge route names the owning agent's fingerprint (or several; see
+[Load balancing](#load-balancing)). The edge picks a live session of that agent, opens a
+stream, and forwards the request with the `Host` in the preamble; the agent matches the same
+`Host` against its own `routes` and dials the backend. Both ends must agree on the host
+patterns.
 
 The edge answers with a plain HTTP status when it cannot forward:
 
@@ -592,6 +603,67 @@ When the agent itself cannot reach a backend (the local service is down, or the 
 route for the host), it writes a `502` back through the tunnel, so the client gets a proper
 error rather than a dropped connection. The failure is logged on the agent with the request's
 `conn_id`.
+
+### Load balancing
+
+A route can be served by several agents. The edge keeps every live agent session, picks one
+per incoming connection, and spreads the load:
+
+```yaml
+routes:
+  # Two agents, each with its own certificate.
+  - host: api.example.com
+    agent_fingerprints: ["SHA256:aaa...", "SHA256:bbb..."]
+    balance: least_conn          # default; or round_robin
+  # Any number of agents that all run with one certificate.
+  - host: app.example.com
+    agent_fingerprint: "SHA256:ccc..."
+    allow_shared_cert: true
+```
+
+- **Two ways to add agents.** Give each agent its own certificate and list the fingerprints
+  (`agent_fingerprints`), or run several agents with the same certificate and set
+  `allow_shared_cert`. Separate certificates can be revoked one at a time and make each agent
+  visible in metrics. A shared certificate is simpler to roll out; one certificate can hold at
+  most 256 open sessions (draining ones included) plus 256 still connecting, which bounds
+  what a leaked one can take from the edge. Without
+  `allow_shared_cert`, a second live connection with an already-connected fingerprint is
+  refused, which stops a cloned certificate from taking over a host. A connection whose agent
+  is stopping does not count, so its replacement can connect while it drains.
+- **Algorithms.** `least_conn` (the default) sends a new connection to the session with the
+  fewest open streams, so long-lived WebSockets do not pile up on one agent. `round_robin`
+  takes the sessions in turn. Neither checks the service behind an agent: an agent whose
+  service is down answers each connection with a quick `502`, so under `least_conn` it has
+  few open streams and gets more of the new ones. Watch the per-route failure metrics.
+- **Per connection, not per request.** The edge picks an agent when a client connection
+  arrives. Further requests on the same keep-alive connection stay on that agent.
+- **Graceful handoff.** An agent that is stopping (`SIGTERM`, `systemctl stop`) first asks the
+  edge to take it out of the pool and waits for the acknowledgement, serves whatever was
+  already on its way, and only then drains. New connections go to the other agents, so a
+  restart costs no requests. Waiting for the acknowledgement takes at most half of
+  `drain_timeout`. With a `drain_timeout` under 2 seconds there is no handoff: the stopping
+  agent refuses new connections, the edge sends them to another agent, and in-flight
+  requests keep the whole `drain_timeout`. This needs the edge and the agent both
+  at this version or later (they negotiate it in the TLS handshake); with an older edge or
+  agent, a stopping agent refuses new connections while it drains, as before, and the edge
+  cannot tell those refusals apart from served connections, so it does not retry them.
+- **Failover.** If the chosen session turns out to be dead (a crashed agent, whose connection
+  closes or resets), the edge evicts it and tries the next one before answering, so only
+  requests already in flight on that agent are lost. An agent also confirms each new stream
+  with one byte, and the edge sends the request only after that, which costs one
+  edge-to-agent round trip per new client connection. If an agent refuses the stream (it is
+  stopping, or its queue of streams not yet taken is full) or does not confirm it within 15 seconds (for example after its
+  network went silent), it never got the request, so the edge sends it to another agent. A
+  request waits at most 30 seconds in all; when no other agent is left to try, the last one
+  may use all of it, unless it has just been found unresponsive. When no agent is live, the client gets a `502`.
+- **Rolling restarts.** Restart agents one at a time; the others carry the traffic meanwhile.
+- **Certificate rotation.** List the new fingerprint next to the old one in
+  `agent_fingerprints`, then switch agents to the new certificate one at a time, and finally
+  drop the old fingerprint. The edge reads routes only at startup, so each of the two config
+  changes needs an edge restart, which briefly reconnects every agent.
+- **Probes never get traffic.** An agent session only joins the pool after it answers a
+  tunnel ping, so a `coen doctor` handshake probe, which closes right after TLS, is never
+  picked.
 
 ### Listener hardening (edge)
 
@@ -732,8 +804,11 @@ starts at `0`, so `rate()` works from the first scrape.
 | `coen_stream_bytes_total` | counter | both | `route`, `direction` | Bytes carried by streams, counted as they flow, so long-lived WebSockets show steady throughput. `in` is client to backend, `out` is backend to client. |
 | `coen_streams_peak` | gauge | both | | Highest concurrent stream count since start. |
 | `coen_draining` | gauge | both | | `1` once shutdown has started and in-flight streams are draining, else `0`. |
-| `coen_tunnel_handshakes_total` | counter | both | `result` | Tunnel connections, as `coen status` counts them. Edge: `ok`, `fail` (authenticated but not allowed), `duplicate` (authenticated but refused because a live session already owns that fingerprint, for example a cloned certificate), `rejected` (refused at TLS). Agent: `ok`, `fail` (the dial, the TLS handshake, or the edge pin failed). |
-| `coen_agent_connected` | gauge | edge | `fingerprint` | `1` when that agent is connected, `0` when a configured agent is offline. |
+| `coen_tunnel_handshakes_total` | counter | both | `result` | Tunnel connections, as `coen status` counts them. Edge: `ok`, `fail` (authenticated but not allowed), `duplicate` (a second connection with a certificate that already has a live session and is not shared, for example a cloned certificate or a `coen doctor` probe from another host), `capped` (refused at a certificate's limit of 256 open sessions, draining ones included, or 256 still connecting), `rejected` (refused at TLS); a real agent that fails the readiness ping counts as `fail`. Agent: `ok`, `fail` (the dial, the TLS handshake, or the edge pin failed). |
+| `coen_agent_connected` | gauge | edge | `fingerprint` | `1` when that agent is connected (also while it drains), `0` when a configured agent is offline. To alert on a route losing capacity, use `coen_agent_sessions == 0`. |
+| `coen_agent_sessions` | gauge | edge | `fingerprint` | Sessions taking new traffic for that fingerprint (draining ones excluded); above `1` only with `allow_shared_cert`. |
+| `coen_agent_streams_active` | gauge | edge | `fingerprint` | Streams open or being set up right now on that agent's sessions, including draining ones: the load `least_conn` balances on. A stalled agent shows its stream attempts here until they time out. |
+| `coen_agent_streams_total` | counter | edge | `fingerprint` | Streams opened on that agent since start, which shows how load is balanced. |
 | `coen_ingress_rejected_total` | counter | edge | `reason`, `route` | Requests the edge answered itself. Without a route: `max_connections` (503; the cap is checked before anything is read, so this counts every connection turned away, probes included), `bad_request` (400), `no_route` (404). With a route: `route_max_connections` (503), `no_agent` (502), `stream_error` (502). A connection that sends no request at all, such as a TCP health check or a browser preconnect, is not a rejected request and is not counted here. A TLS handshake abandoned partway is a `bad_request`. |
 | `coen_ingress_header_timeouts_total` | counter | edge | | Connections closed at `read_header_timeout` without sending any request byte, such as idle browser preconnects. A sudden rise suggests an idle-connection flood. |
 | `coen_tunnel_up` | gauge | agent | | `1` while the tunnel to the edge is established. |
@@ -772,12 +847,13 @@ Delivered:
 - [x] Public-listener hardening: ingress idle-deadlines, connection caps, lazy backend dial
 - [x] Bounded graceful draining of in-flight streams on shutdown
 - [x] Prometheus `/metrics` endpoint, per route and per agent
+- [x] Load balancing across several agents per host, with failover
 
 Still planned (the architecture leaves room for them):
 
 - [ ] ACME and Let's Encrypt automatic certificates for standalone mode
 - [ ] Tunnelling over `:443` (nginx `stream` with `ssl_preread`, or a WebSocket transport)
-- [ ] Load balancing (multiple agents serving the same host); certificate rotation and revocation
+- [ ] Certificate rotation and revocation without an edge restart
 - [ ] QUIC and HTTP/3 transport option
 
 ## Contributing

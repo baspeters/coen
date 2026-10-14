@@ -54,12 +54,43 @@ type IngressConfig struct {
 	IdleTimeout       Duration `yaml:"idle_timeout"`
 }
 
-// EdgeRoute maps a host pattern to the agent (by client-cert fingerprint) that
-// owns it. Host ownership is edge-authoritative.
+// EdgeRoute maps a host pattern to the agent(s) (by client-cert fingerprint)
+// that serve it. Host ownership is edge-authoritative.
+//
+// A route names one agent with AgentFingerprint, or several with
+// AgentFingerprints, and the edge balances connections across every live
+// session among them. AllowSharedCert lets several agents run with the same
+// certificate, so one fingerprint can have several live sessions; without it,
+// a second connection with a fingerprint that is already live is refused.
 type EdgeRoute struct {
-	Host             string `yaml:"host"`
-	AgentFingerprint string `yaml:"agent_fingerprint"`
-	MaxConnections   int    `yaml:"max_connections"`
+	Host              string   `yaml:"host"`
+	AgentFingerprint  string   `yaml:"agent_fingerprint"`
+	AgentFingerprints []string `yaml:"agent_fingerprints"`
+	Balance           string   `yaml:"balance"`
+	AllowSharedCert   bool     `yaml:"allow_shared_cert"`
+	MaxConnections    int      `yaml:"max_connections"`
+}
+
+// Balancing algorithms for EdgeRoute.Balance.
+const (
+	BalanceLeastConn  = "least_conn"  // the session with the fewest open streams (default)
+	BalanceRoundRobin = "round_robin" // each session in turn
+)
+
+// Fingerprints returns the route's agent fingerprints, whichever field set them.
+func (r EdgeRoute) Fingerprints() []string {
+	if r.AgentFingerprint != "" {
+		return []string{r.AgentFingerprint}
+	}
+	return r.AgentFingerprints
+}
+
+// BalanceMode returns the route's balancing algorithm, defaulting to least_conn.
+func (r EdgeRoute) BalanceMode() string {
+	if r.Balance == "" {
+		return BalanceLeastConn
+	}
+	return r.Balance
 }
 
 // AgentRoute maps a host pattern to a local backend service address.
@@ -93,7 +124,24 @@ type EdgeConfig struct {
 func (c *EdgeConfig) AllowedFingerprints() map[string]bool {
 	m := make(map[string]bool, len(c.Routes))
 	for _, r := range c.Routes {
-		m[r.AgentFingerprint] = true
+		for _, fp := range r.Fingerprints() {
+			m[fp] = true
+		}
+	}
+	return m
+}
+
+// SharedFingerprints returns the fingerprints whose routes allow several live
+// sessions (allow_shared_cert). Validation guarantees a fingerprint is either
+// shared on every route that names it or on none.
+func (c *EdgeConfig) SharedFingerprints() map[string]bool {
+	m := make(map[string]bool)
+	for _, r := range c.Routes {
+		if r.AllowSharedCert {
+			for _, fp := range r.Fingerprints() {
+				m[fp] = true
+			}
+		}
 	}
 	return m
 }

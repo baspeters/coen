@@ -12,11 +12,13 @@ import (
 
 	"github.com/baspeters/coen/internal/config"
 	"github.com/baspeters/coen/internal/errpage"
+	"github.com/baspeters/coen/internal/netx"
 	"github.com/baspeters/coen/internal/obs"
 	"github.com/baspeters/coen/internal/pki"
 	"github.com/baspeters/coen/internal/proxy"
 	"github.com/baspeters/coen/internal/route"
 	"github.com/baspeters/coen/internal/tunnel"
+	"github.com/hashicorp/yamux"
 )
 
 // agentRoute is the per-route value stored in the matcher: the backend address
@@ -40,13 +42,18 @@ type Agent struct {
 	versionWarn sync.Once
 }
 
-// drainStreams stops accepting new streams, then waits up to cfg.Drain for
+// drainStreamsFor stops accepting new streams, then waits up to d for
 // in-flight streams to finish.
-func (a *Agent) drainStreams() {
+func (a *Agent) drainStreamsFor(d time.Duration) {
+	a.refuseNew()
+	obs.DrainWait(a.log, &a.inflight, d)
+}
+
+// refuseNew makes serveStream refuse every stream from now on.
+func (a *Agent) refuseNew() {
 	a.mu.Lock()
 	a.draining = true
 	a.mu.Unlock()
-	obs.DrainWait(a.log, &a.inflight, a.cfg.Drain.Duration())
 }
 
 func New(cfg *config.AgentConfig, log *slog.Logger, state *obs.State) (*Agent, error) {
@@ -118,6 +125,9 @@ func (a *Agent) connectOnce(ctx context.Context) (stable bool, err error) {
 		return false, fmt.Errorf("tls handshake: %w", err)
 	}
 	fp := pki.Fingerprint(conn.ConnectionState().PeerCertificates[0])
+	// Version 2 features (drain handshake, stream accept byte) are used only
+	// when both sides negotiated them in the TLS handshake.
+	v2 := conn.ConnectionState().NegotiatedProtocol == tunnel.ALPNv2
 	if pin := a.cfg.Edge.EdgeFingerprint; pin != "" && pin != fp {
 		_ = conn.Close()
 		a.state.HandshakeFail()
@@ -141,41 +151,163 @@ func (a *Agent) connectOnce(ctx context.Context) (stable bool, err error) {
 	defer session.Close()
 	// On cancellation, drain in-flight streams (bounded) then close the session
 	// so AcceptStream unblocks and Run can return promptly on shutdown.
-	stop := make(chan struct{})
-	defer close(stop)
+	acceptCtx, stopAccept := context.WithCancel(context.Background())
+	defer stopAccept()
+	mainStopped := make(chan struct{}) // the main accept loop has ended
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		select {
 		case <-ctx.Done():
-			a.drainStreams()
-			_ = session.Close()
-		case <-stop:
+			a.shutdownSession(ctx, session, v2, stopAccept, mainStopped)
+		case <-mainStopped:
 		}
 	}()
 	for {
-		stream, err := session.AcceptStream()
+		stream, err := session.AcceptStreamWithContext(acceptCtx)
 		if err != nil {
+			close(mainStopped)
+			// If shutdown began (even as the session died on its own),
+			// shutdownSession owns the session: wait until it has drained
+			// the in-flight streams and closed it. Otherwise this returns
+			// at once.
+			<-shutdownDone
 			return time.Since(connectedAt) >= minBackoff, fmt.Errorf("accept stream: %w", err)
 		}
-		a.mu.Lock()
-		if a.draining {
-			a.mu.Unlock()
-			_ = stream.Close()
-			continue
-		}
-		a.inflight.Add(1)
-		a.mu.Unlock()
-		go func() {
-			defer a.inflight.Done()
-			a.handleStream(ctx, stream)
-		}()
+		a.serveStream(ctx, stream, v2)
 	}
 }
+
+// shutdownSession stops serving the session on shutdown.
+//
+// With an edge that supports the graceful handoff (negotiated in the TLS
+// handshake, see tunnel.ALPNv2), the agent asks to be taken out of the
+// edge's pool. Frames arrive in order, so once the edge acknowledges, every
+// stream it opened to this agent is already queued here. GoAway then refuses
+// any further stream, the main accept loop is stopped, and this goroutine
+// alone accepts and serves the queued streams until the queue stays empty.
+// Only then does it drain the in-flight streams and close the session.
+//
+// With an older edge (no drain support negotiated) it keeps the old behaviour:
+// no GoAway, which an older edge would treat as a dead session and close,
+// cutting the streams still draining. New streams are refused while the
+// in-flight ones drain, and that edge has no way to retry them elsewhere.
+//
+// The acknowledgement wait counts against drain_timeout and takes at most
+// half of it. It must be at least tunnel.MinAckWait, so with a drain_timeout
+// under minHandoff the agent does not wait for it: it sends the request in
+// the background (so the edge still takes it out of the pool, and a
+// replacement with the same certificate is not refused as a duplicate) and
+// GoAway; streams already on their way are refused without the accept byte
+// (the edge retries them elsewhere), and the in-flight ones get the whole
+// drain_timeout. On a session that is already closed there is nothing to
+// hand off.
+func (a *Agent) shutdownSession(ctx context.Context, session *yamux.Session, v2 bool, stopAccept context.CancelFunc, mainStopped <-chan struct{}) {
+	budget := a.cfg.Drain.Duration()
+	start := time.Now()
+	switch {
+	case !v2 || budget <= 0 || session.IsClosed():
+		// No handoff: an older edge, no draining at all, or a dead session.
+	case budget < minHandoff:
+		// Neither is waited for, so the in-flight streams keep the whole
+		// budget; both end with the session at the latest.
+		a.refuseNew()
+		go tunnel.RequestDrain(session, budget)
+		go func() { _ = session.GoAway() }()
+	default:
+		// Send GoAway even if the drain acknowledgement does not come in
+		// time: this edge then retires the session the next time it picks
+		// it, and only the ordering guarantee for streams opened at that
+		// moment is lost. The wait is never
+		// shorter than the edge's own (budget/2 >= tunnel.MinAckWait here).
+		ackWait := min(drainAckTimeout, budget/2)
+		if !tunnel.RequestDrain(session, ackWait) {
+			// The edge may still open streams until it sees GoAway. Those
+			// arriving after it are reset by yamux, which the edge retries
+			// elsewhere; those before it are already queued here.
+			a.log.Warn("drain.no_ack", "waited", ackWait.String())
+		}
+		// GoAway can block on a stalled tunnel; do not let it hold up the
+		// shutdown beyond a short bound, so at least a quarter of the budget
+		// is left for the in-flight streams.
+		netx.Bounded(min(goAwayWait, budget/4), func() { _ = session.GoAway() })
+		stopAccept()
+		select {
+		case <-mainStopped:
+		case <-session.CloseChan():
+		}
+		for {
+			qctx, cancel := context.WithTimeout(context.Background(), backlogQuiet)
+			stream, err := session.AcceptStreamWithContext(qctx)
+			cancel()
+			if err != nil {
+				break
+			}
+			if budget-time.Since(start) < minServe {
+				// Too little drain time left to serve it: refuse it (no
+				// accept byte), so the edge retries it on another agent.
+				_ = stream.Close()
+				continue
+			}
+			a.serveStream(ctx, stream, true)
+		}
+	}
+	remaining := budget - time.Since(start)
+	if budget > 0 && remaining <= 0 {
+		remaining = time.Millisecond // budget spent: a last look, then close
+	}
+	a.drainStreamsFor(remaining)
+	_ = session.Close()
+}
+
+// serveStream handles stream on its own goroutine, counted as in flight, unless
+// the agent is already draining, in which case the stream is refused (closed
+// without the accept byte, so a version 2 edge retries it elsewhere). accept
+// says whether to send the accept byte (version 2 sessions).
+func (a *Agent) serveStream(ctx context.Context, stream net.Conn, accept bool) {
+	a.mu.Lock()
+	if a.draining {
+		a.mu.Unlock()
+		_ = stream.Close()
+		return
+	}
+	a.inflight.Add(1)
+	a.mu.Unlock()
+	go func() {
+		defer a.inflight.Done()
+		a.handleStream(ctx, stream, accept)
+	}()
+}
+
+// drainAckTimeout bounds the wait for the edge to acknowledge a drain request;
+// tunnel.MinAckWait floors it, so a slow acknowledgement still arrives.
+// goAwayWait bounds sending GoAway on a stalled tunnel. backlogQuiet is how
+// long the accept queue must stay empty, after GoAway, before the agent stops
+// accepting. yamux resets every stream that arrives after the agent's GoAway,
+// so the queue is complete once GoAway is sent; the short wait only lets the
+// accept loop drain it.
+const (
+	drainAckTimeout = 3 * time.Second
+	goAwayWait      = time.Second
+	backlogQuiet    = 50 * time.Millisecond
+	minHandoff      = 2 * tunnel.MinAckWait  // the shortest drain_timeout that gets a handoff
+	minServe        = 500 * time.Millisecond // drain time a queued stream needs to be taken
+)
 
 // preambleReadTimeout bounds how long handleStream waits for a stream's preamble.
 const preambleReadTimeout = 10 * time.Second
 
-func (a *Agent) handleStream(ctx context.Context, stream net.Conn) {
+func (a *Agent) handleStream(ctx context.Context, stream net.Conn, accept bool) {
 	defer stream.Close()
+	if accept {
+		// Take the stream on arrival, before reading anything on it, so an
+		// edge that sees it close without this byte knows the agent refused
+		// it (draining, or its accept queue full) and read nothing of the request.
+		if err := tunnel.Accept(stream); err != nil {
+			a.log.Debug("stream.accept_error", "error", err.Error())
+			return
+		}
+	}
 	// Bound the preamble read so a stream that never sends one (a hung or
 	// misbehaving edge) cannot pin this goroutine indefinitely.
 	_ = stream.SetReadDeadline(time.Now().Add(preambleReadTimeout))

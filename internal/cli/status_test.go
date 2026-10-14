@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"os"
@@ -119,5 +120,51 @@ func TestStatusCommandShowsAgents(t *testing.T) {
 	}
 	if !strings.Contains(out, "agents:") || !strings.Contains(out, "SHA256:abc") {
 		t.Fatalf("expected an agents block with the fingerprint, got %q", out)
+	}
+}
+
+func TestRenderEdgeStatusShowsDraining(t *testing.T) {
+	var buf strings.Builder
+	renderStatus(&buf, obs.Snapshot{Role: "edge", Agents: []obs.AgentInfo{
+		{Fingerprint: "SHA256:a", RemoteAddr: "10.0.0.1:5"},
+		{Fingerprint: "SHA256:b", RemoteAddr: "10.0.0.2:5", Draining: true},
+	}}, false)
+	out := buf.String()
+	if !strings.Contains(out, "2 sessions (1 draining), 2 certificates") || !strings.Contains(out, "SHA256:b, draining)") || strings.Contains(out, "SHA256:a, draining") {
+		t.Fatalf("draining not rendered:\n%s", out)
+	}
+}
+
+func TestRenderEdgeStatusCountsSessionsAndCertificates(t *testing.T) {
+	var buf strings.Builder
+	renderStatus(&buf, obs.Snapshot{Role: "edge", Agents: []obs.AgentInfo{
+		{Fingerprint: "SHA256:s", RemoteAddr: "10.0.0.1:5"},
+		{Fingerprint: "SHA256:s", RemoteAddr: "10.0.0.2:5"},
+	}}, false)
+	if !strings.Contains(buf.String(), "2 sessions, 1 certificate") {
+		t.Fatalf("two sessions on one certificate not rendered as such:\n%s", buf.String())
+	}
+}
+
+// Refusals of duplicate and over-cap sessions show only once there are any.
+func TestRenderEdgeStatusShowsRefusedSessions(t *testing.T) {
+	var plain bytes.Buffer
+	renderEdgeStatus(&plain, obs.Snapshot{Role: "edge", HandshakeOK: 1})
+	if strings.Contains(plain.String(), "capped") {
+		t.Fatalf("no refusals, yet they are shown:\n%s", plain.String())
+	}
+	var b bytes.Buffer
+	renderEdgeStatus(&b, obs.Snapshot{Role: "edge", HandshakeOK: 1, HandshakeDup: 2, HandshakeCapped: 3})
+	if !strings.Contains(b.String(), "1 ok / 0 fail / 0 rejected / 2 duplicate / 3 capped") {
+		t.Fatalf("refusals not shown:\n%s", b.String())
+	}
+}
+
+// One session reads in the singular.
+func TestRenderEdgeStatusSingularSession(t *testing.T) {
+	var buf strings.Builder
+	renderStatus(&buf, obs.Snapshot{Role: "edge", Agents: []obs.AgentInfo{{Fingerprint: "SHA256:a", Draining: true}}}, false)
+	if !strings.Contains(buf.String(), "1 session (1 draining), 1 certificate") {
+		t.Fatalf("not singular:\n%s", buf.String())
 	}
 }

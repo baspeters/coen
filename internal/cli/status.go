@@ -132,16 +132,44 @@ func renderEdgeStatus(out io.Writer, s obs.Snapshot) {
 	if s.SelfFingerprint != "" {
 		fmt.Fprintf(out, "self_fp:    %s\n", s.SelfFingerprint)
 	}
-	fmt.Fprintf(out, "agents:     %d connected\n", len(s.Agents))
+	// One agent can have several sessions (a shared certificate, or a
+	// restarting agent whose old session is still draining).
+	draining := 0
+	fps := map[string]bool{}
 	for _, a := range s.Agents {
-		fmt.Fprintf(out, "  - %s (%s, %s)\n", agentIP(a.RemoteAddr), a.ConnectedSince.Format("2006-01-02 15:04:05"), a.Fingerprint)
+		fps[a.Fingerprint] = true
+		if a.Draining {
+			draining++
+		}
+	}
+	// Agents sharing a certificate cannot be told apart, so with several
+	// sessions per certificate both counts are shown.
+	switch {
+	case len(s.Agents) == len(fps) && draining == 0:
+		fmt.Fprintf(out, "agents:     %d connected\n", len(fps))
+	case draining == 0:
+		fmt.Fprintf(out, "agents:     %s, %s\n", plural(len(s.Agents), "session"), plural(len(fps), "certificate"))
+	default:
+		fmt.Fprintf(out, "agents:     %s (%d draining), %s\n", plural(len(s.Agents), "session"), draining, plural(len(fps), "certificate"))
+	}
+	for _, a := range s.Agents {
+		suffix := ""
+		if a.Draining {
+			suffix = ", draining"
+		}
+		fmt.Fprintf(out, "  - %s (%s, %s%s)\n", agentIP(a.RemoteAddr), a.ConnectedSince.Format("2006-01-02 15:04:05"), a.Fingerprint, suffix)
 	}
 	fmt.Fprintf(out, "streams:    %d active / %d max\n", s.ActiveStreams, s.MaxStreams)
 	fmt.Fprintf(out, "bytes:      %d in / %d out\n", s.BytesIn, s.BytesOut)
 	// "rejected" is unauthenticated/incompatible peers refused at the TLS
 	// handshake (routine scanner noise on a public mTLS port); "fail" is a peer
-	// that authenticated but was not authorized for any route.
-	fmt.Fprintf(out, "handshakes: %d ok / %d fail / %d rejected\n", s.HandshakeOK, s.HandshakeFail, s.HandshakeRejected)
+	// that authenticated but was not authorized for any route, or a real
+	// agent that failed the readiness ping.
+	if s.HandshakeDup > 0 || s.HandshakeCapped > 0 {
+		fmt.Fprintf(out, "handshakes: %d ok / %d fail / %d rejected / %d duplicate / %d capped\n", s.HandshakeOK, s.HandshakeFail, s.HandshakeRejected, s.HandshakeDup, s.HandshakeCapped)
+	} else {
+		fmt.Fprintf(out, "handshakes: %d ok / %d fail / %d rejected\n", s.HandshakeOK, s.HandshakeFail, s.HandshakeRejected)
+	}
 }
 
 func renderAgentStatus(out io.Writer, s obs.Snapshot) {
@@ -159,4 +187,12 @@ func renderAgentStatus(out io.Writer, s obs.Snapshot) {
 	fmt.Fprintf(out, "streams:    %d active / %d max\n", s.ActiveStreams, s.MaxStreams)
 	fmt.Fprintf(out, "bytes:      %d in / %d out\n", s.BytesIn, s.BytesOut)
 	fmt.Fprintf(out, "handshakes: %d ok / %d fail\n", s.HandshakeOK, s.HandshakeFail)
+}
+
+// plural returns n and word, with an s unless n is 1.
+func plural(n int, word string) string {
+	if n == 1 {
+		return "1 " + word
+	}
+	return fmt.Sprintf("%d %ss", n, word)
 }

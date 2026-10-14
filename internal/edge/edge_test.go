@@ -158,6 +158,11 @@ func TestEdgeRoutesToAgent(t *testing.T) {
 			}
 			go func(s net.Conn) {
 				defer s.Close()
+				// A version 2 agent takes the stream on arrival, before the
+				// edge sends the request.
+				if err := tunnel.Accept(s); err != nil {
+					return
+				}
 				p, err := tunnel.ReadPreamble(s)
 				if err != nil || p.ConnID == "" {
 					return
@@ -387,7 +392,8 @@ func TestEdgeProbeDoesNotDisplaceLiveAgent(t *testing.T) {
 	if agentsConnected(e) != 1 {
 		t.Fatalf("agents connected = %d, want 1", agentsConnected(e))
 	}
-	// The refused probe is counted as a duplicate, not as ok or fail.
+	// A second connection with a certificate that is already live is refused
+	// at once, before the readiness ping, and counted as a duplicate.
 	if snap := e.state.Snapshot(); snap.HandshakeDup != 1 || snap.HandshakeOK != 1 {
 		t.Fatalf("duplicate = %d ok = %d, want 1 and 1", snap.HandshakeDup, snap.HandshakeOK)
 	}
@@ -757,8 +763,8 @@ func TestHandleIngressRoutesByHost(t *testing.T) {
 		state: &obs.State{},
 		reg:   newRegistry(),
 		routes: route.Build([]route.Entry[*routeState]{
-			{Pattern: "app.example.com", Value: &routeState{fingerprint: "FP-A"}},
-			{Pattern: "api.example.com", Value: &routeState{fingerprint: "FP-B"}},
+			{Pattern: "app.example.com", Value: &routeState{fingerprints: []string{"FP-A"}}},
+			{Pattern: "api.example.com", Value: &routeState{fingerprints: []string{"FP-B"}}},
 		}),
 	}
 	e.reg.set("FP-A", srvA)
@@ -811,7 +817,7 @@ func TestGlobalConnectionCap(t *testing.T) {
 		state: &obs.State{},
 		reg:   newRegistry(),
 		routes: route.Build([]route.Entry[*routeState]{
-			{Pattern: "*", Value: &routeState{fingerprint: "FP"}},
+			{Pattern: "*", Value: &routeState{fingerprints: []string{"FP"}}},
 		}),
 		sem: newSemaphore(1),
 	}
@@ -834,7 +840,7 @@ func TestGlobalConnectionCap(t *testing.T) {
 func TestPerRouteConnectionCap(t *testing.T) {
 	srv, cli := newServerSession(t)
 	defer cli.Close()
-	rs := &routeState{fingerprint: "FP", sem: newSemaphore(1)}
+	rs := &routeState{fingerprints: []string{"FP"}, sem: newSemaphore(1)}
 	e := &Edge{
 		cfg:    &config.EdgeConfig{},
 		log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -865,7 +871,7 @@ func TestReadHeaderTimeout(t *testing.T) {
 		log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		state:  &obs.State{},
 		reg:    newRegistry(),
-		routes: route.Build([]route.Entry[*routeState]{{Pattern: "*", Value: &routeState{fingerprint: "FP"}}}),
+		routes: route.Build([]route.Entry[*routeState]{{Pattern: "*", Value: &routeState{fingerprints: []string{"FP"}}}}),
 	}
 	client, edgeConn := net.Pipe()
 	go e.handleIngress(edgeConn)
@@ -891,7 +897,7 @@ func TestEdgeDrainWaitsForInFlight(t *testing.T) {
 		log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		state:  &obs.State{},
 		reg:    newRegistry(),
-		routes: route.Build([]route.Entry[*routeState]{{Pattern: "*", Value: &routeState{fingerprint: "FP"}}}),
+		routes: route.Build([]route.Entry[*routeState]{{Pattern: "*", Value: &routeState{fingerprints: []string{"FP"}}}}),
 	}
 	e.reg.set("FP", srv)
 
@@ -968,7 +974,7 @@ func TestHandleIngressBrokenSessionReturns502(t *testing.T) {
 		log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		state:  &obs.State{},
 		reg:    newRegistry(),
-		routes: route.Build([]route.Entry[*routeState]{{Pattern: "*", Value: &routeState{fingerprint: "FP"}}}),
+		routes: route.Build([]route.Entry[*routeState]{{Pattern: "*", Value: &routeState{fingerprints: []string{"FP"}}}}),
 	}
 	e.reg.set("FP", srv)
 	client, edgeConn := net.Pipe()

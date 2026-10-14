@@ -7,7 +7,7 @@ import (
 
 func TestPreambleCarriesEdgeVersion(t *testing.T) {
 	var buf bytes.Buffer
-	if err := WritePreamble(&buf, Preamble{ConnID: "c", Host: "h", EdgeVersion: "v1.2.3"}); err != nil {
+	if err := writePreamble(&buf, Preamble{ConnID: "c", Host: "h", EdgeVersion: "v1.2.3"}); err != nil {
 		t.Fatal(err)
 	}
 	p, err := ReadPreamble(&buf)

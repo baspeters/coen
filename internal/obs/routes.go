@@ -221,7 +221,8 @@ type Detail struct {
 	UnroutedFailures ReasonCounts
 	HeaderTimeouts   int64
 	Draining         bool
-	ExpectedAgents   []string // sorted
+	ExpectedAgents   []string         // sorted
+	AgentStreams     map[string]int64 // streams opened per fingerprint, ever
 	StartTime        time.Time
 }
 
@@ -254,6 +255,10 @@ func (s *State) Detail() Detail {
 	s.agentsMu.Lock()
 	for fp := range s.expected {
 		d.ExpectedAgents = append(d.ExpectedAgents, fp)
+	}
+	d.AgentStreams = make(map[string]int64, len(s.agentTotals))
+	for fp, n := range s.agentTotals {
+		d.AgentStreams[fp] = n.Load()
 	}
 	s.agentsMu.Unlock()
 	sort.Strings(d.ExpectedAgents)

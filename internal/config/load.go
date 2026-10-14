@@ -99,18 +99,68 @@ func (c *EdgeConfig) Validate() error {
 	if len(c.Routes) == 0 {
 		return fmt.Errorf("at least one route is required")
 	}
+	sharedBy := map[string]string{}  // fingerprint -> a route that shares it
+	exclusive := map[string]string{} // fingerprint -> a route that does not
 	for i, r := range c.Routes {
 		if r.Host == "" {
 			return fmt.Errorf("route %d: host is required", i)
 		}
-		if r.AgentFingerprint == "" {
-			return fmt.Errorf("route %q: agent_fingerprint is required", r.Host)
-		}
 		if err := route.ValidatePattern(r.Host); err != nil {
 			return fmt.Errorf("route %d: %w", i, err)
 		}
+		if err := r.validateAgents(); err != nil {
+			return fmt.Errorf("route %q: %w", r.Host, err)
+		}
+		for _, fp := range r.Fingerprints() {
+			if r.AllowSharedCert {
+				sharedBy[fp] = r.Host
+			} else {
+				exclusive[fp] = r.Host
+			}
+		}
+	}
+	// Sharing is a property of the certificate, not of one route: a
+	// fingerprint shared on one route but exclusive on another would make the
+	// duplicate guard depend on which route a connection happens to serve.
+	// A second pass in config order keeps the error stable when several
+	// fingerprints conflict.
+	for _, r := range c.Routes {
+		for _, fp := range r.Fingerprints() {
+			shared, isShared := sharedBy[fp]
+			other, isExclusive := exclusive[fp]
+			if isShared && isExclusive {
+				return fmt.Errorf("agent fingerprint %s has allow_shared_cert on route %q but not on route %q; set it on every route that names it, or on none", fp, shared, other)
+			}
+		}
 	}
 	return nil
+}
+
+// validateAgents checks the route names its agents in exactly one way, with no
+// empty or repeated fingerprint, and a known balancing algorithm.
+func (r EdgeRoute) validateAgents() error {
+	switch {
+	case r.AgentFingerprint != "" && len(r.AgentFingerprints) > 0:
+		return fmt.Errorf("set agent_fingerprint or agent_fingerprints, not both")
+	case r.AgentFingerprint == "" && len(r.AgentFingerprints) == 0:
+		return fmt.Errorf("agent_fingerprint or agent_fingerprints is required")
+	}
+	seen := map[string]bool{}
+	for _, fp := range r.AgentFingerprints {
+		if fp == "" {
+			return fmt.Errorf("agent_fingerprints has an empty entry")
+		}
+		if seen[fp] {
+			return fmt.Errorf("agent_fingerprints lists %s twice", fp)
+		}
+		seen[fp] = true
+	}
+	switch r.Balance {
+	case "", BalanceLeastConn, BalanceRoundRobin:
+		return nil
+	default:
+		return fmt.Errorf("balance must be %q or %q, got %q", BalanceLeastConn, BalanceRoundRobin, r.Balance)
+	}
 }
 
 func LoadAgent(path string) (*AgentConfig, error) {

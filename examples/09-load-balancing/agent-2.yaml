@@ -1,0 +1,9 @@
+# Agent 2 of api.example.com, on another host, with its own certificate.
+edge:
+  address: edge.example.com:2636
+  ca:   /etc/coen/pki/ca.crt
+  cert: /etc/coen/pki/agent-2.crt
+  key:  /etc/coen/pki/agent-2.key
+routes:
+  - host: api.example.com
+    service: 127.0.0.1:9000

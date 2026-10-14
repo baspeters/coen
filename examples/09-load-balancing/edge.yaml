@@ -1,0 +1,24 @@
+ingress:
+  mode: standalone
+  listen: ":443"
+  tls:
+    cert: /etc/coen/certs/public.crt
+    key:  /etc/coen/certs/public.key
+tunnel:
+  listen: ":2636"
+  ca:   /etc/coen/pki/ca.crt
+  cert: /etc/coen/pki/edge.crt
+  key:  /etc/coen/pki/edge.key
+routes:
+  # Two agents with their own certificates; new connections go to the one
+  # with the fewest open streams.
+  - host: api.example.com
+    agent_fingerprints:
+      - "REPLACE_WITH_AGENT_1_FINGERPRINT"
+      - "REPLACE_WITH_AGENT_2_FINGERPRINT"
+    balance: least_conn
+  # Any number of agents running with one shared certificate, in turn.
+  - host: app.example.com
+    agent_fingerprint: "REPLACE_WITH_SHARED_AGENT_FINGERPRINT"
+    allow_shared_cert: true
+    balance: round_robin

@@ -16,9 +16,49 @@ import (
 func (r *registry) set(fp string, s *yamux.Session) (prev *yamux.Session) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	prev = r.sessions[fp]
-	r.sessions[fp] = s
+	if conns := r.byFP[fp]; len(conns) > 0 {
+		prev = conns[0].sess
+	}
+	r.byFP[fp] = []*agentConn{{fp: fp, sess: s}}
+	if r.all[s] == nil {
+		r.all[s] = &tracked{fp: fp, joined: true} // pooled, so counted as joined
+		r.joined[fp]++
+	}
 	return prev
+}
+
+// register, get, and remove are test conveniences over the registry.
+func (r *registry) register(fp string, s *yamux.Session) bool {
+	r.track(fp, s)
+	res, _ := r.registerConn(fp, &agentConn{fp: fp, sess: s})
+	return res == registered
+}
+
+func (r *registry) get(fp string) (*yamux.Session, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if conns := r.byFP[fp]; len(conns) > 0 {
+		return conns[0].sess, true
+	}
+	return nil, false
+}
+
+func (r *registry) remove(fp string, s *yamux.Session) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, c := range r.byFP[fp] {
+		if c.sess == s {
+			r.removeLocked(fp, s)
+			return true
+		}
+	}
+	return false
+}
+
+// pickNext picks with a fresh rotation start, as handleIngress does for a
+// request's first pick.
+func (rs *routeState) pickNext(cands []*agentConn, tried map[*agentConn]bool) *agentConn {
+	return rs.pick(cands, tried, rs.nextTurn())
 }
 
 func newServerSession(t *testing.T) (*yamux.Session, *yamux.Session) {
@@ -56,18 +96,25 @@ func TestRegistrySetGetRemove(t *testing.T) {
 	}
 }
 
-// size and any are test-only introspection helpers for the registry.
+// size and any are test-only introspection helpers for the registry: size
+// counts sessions across all fingerprints.
 func (r *registry) size() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return len(r.sessions)
+	n := 0
+	for _, conns := range r.byFP {
+		n += len(conns)
+	}
+	return n
 }
 
 func (r *registry) any() *yamux.Session {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	for _, s := range r.sessions {
-		return s
+	for _, conns := range r.byFP {
+		if len(conns) > 0 {
+			return conns[0].sess
+		}
 	}
 	return nil
 }
@@ -104,5 +151,41 @@ func TestRegistryRegisterReplacesDeadIncumbent(t *testing.T) {
 	}
 	if got, _ := r.get("AA"); got != live {
 		t.Fatal("the live session should have replaced the dead incumbent")
+	}
+}
+
+// Looking up live sessions leaves the pool untouched when none has closed,
+// and removes the fingerprint once all have.
+func TestLiveLockedWritesOnlyOnChange(t *testing.T) {
+	r := newRegistry()
+	r.shared["FP"] = true
+	s1, c1 := newServerSession(t)
+	defer c1.Close()
+	s2, c2 := newServerSession(t)
+	defer c2.Close()
+	_, _ = r.registerConn("FP", &agentConn{fp: "FP", sess: s1})
+	_, _ = r.registerConn("FP", &agentConn{fp: "FP", sess: s2})
+	r.mu.Lock()
+	before := r.byFP["FP"]
+	live := r.liveLocked("FP")
+	same := &live[0] == &before[0] && len(live) == 2
+	r.mu.Unlock()
+	if !same {
+		t.Fatal("an unchanged pool was rewritten")
+	}
+	_ = s1.Close()
+	r.mu.Lock()
+	n := len(r.liveLocked("FP"))
+	r.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("live = %d, want 1", n)
+	}
+	_ = s2.Close()
+	r.mu.Lock()
+	_ = r.liveLocked("FP")
+	_, present := r.byFP["FP"]
+	r.mu.Unlock()
+	if present {
+		t.Fatal("an empty pool stays in the map")
 	}
 }
