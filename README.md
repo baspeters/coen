@@ -83,8 +83,9 @@ file, and no third party in the data path.
 - Automatic reconnect. The agent retries with exponential backoff and jitter; yamux
   keepalives notice dead peers behind NAT.
 - Diagnostics that actually help. Named connectivity events in the logs, a `conn_id` that ties
-  a single request together across both processes, a `coen doctor` preflight, and a live
-  `coen status` socket.
+  a single request together across both processes, a `coen doctor` preflight, a live
+  `coen status` socket, and an opt-in Prometheus `/metrics` endpoint with per-route and
+  per-agent series.
 - Simple to operate. One binary with subcommands, YAML config, and a `coen install` that
   writes a hardened systemd unit on Linux or a launchd job on macOS.
 - Small footprint. Pure Go with three third-party dependencies (`cobra`, `yamux`, `yaml.v3`);
@@ -492,6 +493,8 @@ log:
   # format:                 # unset autodetects (journal under systemd, text otherwise); text|json|journal
 admin:
   socket: /run/coen/edge.sock
+metrics:                    # optional; unset disables the endpoint
+  listen: 127.0.0.1:9464    # Prometheus GET /metrics; keep it private, it has no auth
 ```
 
 | Key | Type | Default | Description |
@@ -512,7 +515,8 @@ admin:
 | `drain_timeout` | duration | `15s` | On shutdown, finish in-flight streams for up to this long before force-closing. `0` or unset uses the default (15s). |
 | `log.level` | string | `info` | `trace`, `debug`, `info`, `warn`, or `error`. |
 | `log.format` | string | autodetect | `text`, `json`, or `journal`. Unset autodetects: `journal` under systemd (journald), otherwise `text`. See [Log formats](#log-formats). |
-| `admin.socket` | path | (unset) | Unix socket for `coen status` and `coen doctor`'s live-tunnel check. When unset, the admin socket is disabled. |
+| `admin.socket` | path | (unset) | Unix socket for `coen status` and `coen doctor`'s live-tunnel check. When unset, the admin socket is disabled. A small `<socket>.lock` file next to it coordinates a restart that overlaps a draining instance and is left in place. |
+| `metrics.listen` | string | (unset) | `host:port` for the Prometheus endpoint (`GET /metrics`). When unset, metrics are disabled. It has no authentication, so bind it to loopback or a private interface. See [Prometheus metrics](#prometheus-metrics). |
 
 ### Agent configuration (`agent.yaml`)
 
@@ -535,6 +539,8 @@ log:
   # format:                 # unset autodetects (journal under systemd, text otherwise); text|json|journal
 admin:
   socket: /run/coen/agent.sock
+metrics:                    # optional; unset disables the endpoint
+  listen: 127.0.0.1:9465
 ```
 
 | Key | Type | Default | Description |
@@ -551,7 +557,8 @@ admin:
 | `drain_timeout` | duration | `15s` | On shutdown, finish in-flight streams for up to this long. `0` or unset uses the default (15s). |
 | `log.level` | string | `info` | `trace`, `debug`, `info`, `warn`, or `error`. |
 | `log.format` | string | autodetect | `text`, `json`, or `journal`. Unset autodetects: `journal` under systemd (journald), otherwise `text`. See [Log formats](#log-formats). |
-| `admin.socket` | path | (unset) | Unix socket for `coen status` and `coen doctor`'s live-tunnel check. When unset, the admin socket is disabled. |
+| `admin.socket` | path | (unset) | Unix socket for `coen status` and `coen doctor`'s live-tunnel check. When unset, the admin socket is disabled. A small `<socket>.lock` file next to it coordinates a restart that overlaps a draining instance and is left in place. |
+| `metrics.listen` | string | (unset) | `host:port` for the Prometheus endpoint (`GET /metrics`). When unset, metrics are disabled. It has no authentication, so bind it to loopback or a private interface. See [Prometheus metrics](#prometheus-metrics). |
 
 Host patterns appear on both ends: the edge authorizes which agent owns a host, and the agent
 maps the same host to a backend.
@@ -603,7 +610,8 @@ error rather than a dropped connection. The failure is logged on the agent with 
 
 On `SIGINT` or `SIGTERM`, the edge stops accepting new ingress connections and the agent stops
 accepting new streams; both then wait up to `drain_timeout` for in-flight streams to finish
-before force-closing and exiting. An unset or `0` `drain_timeout` uses the default (15s).
+before force-closing and exiting. The admin socket and the metrics endpoint stay up until the
+drain is over, so `coen status` and Prometheus can follow it. An unset or `0` `drain_timeout` uses the default (15s).
 
 See [`examples/`](examples/) for an example configuration of each variant.
 
@@ -689,6 +697,49 @@ edge. Only the `log.level` can be
 changed on a running daemon (with `systemctl reload` or `SIGHUP`); other changes need a
 restart.
 
+### Prometheus metrics
+
+Set `metrics.listen` on the edge, the agent, or both, and the daemon serves the Prometheus
+text format on `GET /metrics`. The endpoint is off by default and has no authentication,
+so bind it to loopback or a private interface. The config is rejected if the address
+overlaps `tunnel.listen` or `ingress.listen`: the same port, and the same address or a
+wildcard (`0.0.0.0`, `::`, or an empty host, all dual-stack in Go). `localhost` counts as
+the loopback addresses; other hostnames are compared as written, because loading a config
+never does a DNS lookup. On the agent it must also not overlap any route's
+`service` address, since a metrics endpoint on a backend's port would expose it publicly. An address the host does not have, or a
+port it may not bind, stops the daemon at startup. A port held by another process, including
+a second live coen daemon or the other role, stops it too. The one exception is a previous
+instance of the same role that is draining (it reports `coen_draining 1`): the daemon
+starts, logs `metrics.listen_busy`, and claims the port once it is free; the predecessor's
+own `drain_timeout` bounds the wait. If the port ends up held by anything else, it logs
+`metrics.listen_failed` and runs without metrics until restarted. `coen doctor` checks that the
+address can be bound. The endpoint stays up during a graceful
+shutdown until the drain finishes, so you can watch in-flight streams fall to zero. See
+[`examples/08-prometheus-metrics`](examples/08-prometheus-metrics/) for a scrape config and
+alert queries.
+
+The `route` label is always a host pattern from the config, never a value taken from a
+request, so the number of series is fixed by configuration and does not grow with traffic.
+Failures that happen before a route is known carry no `route` label. Every known `reason`
+starts at `0`, so `rate()` works from the first scrape.
+
+| Metric | Type | Role | Labels | Meaning |
+| --- | --- | --- | --- | --- |
+| `coen_build_info` | gauge | both | `role`, `version` | Always `1`; carries the build version. |
+| `coen_process_start_time_seconds` | gauge | both | | Daemon start time, Unix seconds. |
+| `coen_streams_active` | gauge | both | `route` | Streams open right now. |
+| `coen_streams_total` | counter | both | `route` | Streams opened. |
+| `coen_stream_bytes_total` | counter | both | `route`, `direction` | Bytes carried by streams, counted as they flow, so long-lived WebSockets show steady throughput. `in` is client to backend, `out` is backend to client. |
+| `coen_streams_peak` | gauge | both | | Highest concurrent stream count since start. |
+| `coen_draining` | gauge | both | | `1` once shutdown has started and in-flight streams are draining, else `0`. |
+| `coen_tunnel_handshakes_total` | counter | both | `result` | Tunnel connections, as `coen status` counts them. Edge: `ok`, `fail` (authenticated but not allowed), `duplicate` (authenticated but refused because a live session already owns that fingerprint, for example a cloned certificate), `rejected` (refused at TLS). Agent: `ok`, `fail` (the dial, the TLS handshake, or the edge pin failed). |
+| `coen_agent_connected` | gauge | edge | `fingerprint` | `1` when that agent is connected, `0` when a configured agent is offline. |
+| `coen_ingress_rejected_total` | counter | edge | `reason`, `route` | Requests the edge answered itself. Without a route: `max_connections` (503; the cap is checked before anything is read, so this counts every connection turned away, probes included), `bad_request` (400), `no_route` (404). With a route: `route_max_connections` (503), `no_agent` (502), `stream_error` (502). A connection that sends no request at all, such as a TCP health check or a browser preconnect, is not a rejected request and is not counted here. A TLS handshake abandoned partway is a `bad_request`. |
+| `coen_ingress_header_timeouts_total` | counter | edge | | Connections closed at `read_header_timeout` without sending any request byte, such as idle browser preconnects. A sudden rise suggests an idle-connection flood. |
+| `coen_tunnel_up` | gauge | agent | | `1` while the tunnel to the edge is established. |
+| `coen_tunnel_reconnects_total` | counter | agent | | Reconnect attempts. |
+| `coen_stream_errors_total` | counter | agent | `reason`, `route` | Streams the agent could not serve. Without a route: `preamble_error` (a malformed or late stream header; the stream is closed) and `no_route` (502). A stream cut off by an edge restart is not counted. With a route: `dial_error` (502, backend unreachable). |
+
 ## Running as a systemd service
 
 `coen install` writes a hardened unit and an example config for each role.
@@ -720,11 +771,11 @@ Delivered:
 - [x] Multi-route and multiple hostnames (host-based routing at the edge, across multiple agents)
 - [x] Public-listener hardening: ingress idle-deadlines, connection caps, lazy backend dial
 - [x] Bounded graceful draining of in-flight streams on shutdown
+- [x] Prometheus `/metrics` endpoint, per route and per agent
 
 Still planned (the architecture leaves room for them):
 
 - [ ] ACME and Let's Encrypt automatic certificates for standalone mode
-- [ ] Prometheus `/metrics` endpoint (the counters are already tracked internally)
 - [ ] Tunnelling over `:443` (nginx `stream` with `ssl_preread`, or a WebSocket transport)
 - [ ] Load balancing (multiple agents serving the same host); certificate rotation and revocation
 - [ ] QUIC and HTTP/3 transport option
@@ -779,7 +830,9 @@ internal/
   proxy/             byte-copy plumbing, idle-deadline and prefix conn wrappers
   pki/               Ed25519 CA, certificate issuance, fingerprints
   config/            YAML load, .d drop-in merge, and validation
-  obs/               slog logging, correlation IDs, live counters
+  obs/               slog logging, correlation IDs, live and per-route counters
+  metrics/           opt-in Prometheus /metrics endpoint (hand-written text format)
+  netx/              platform-neutral network error checks (address in use, not available)
   admin/             local unix-socket status and control server
   doctor/            preflight diagnostic checks
   e2e/               end-to-end tests (HTTP, WebSocket, correlation, host routing)
