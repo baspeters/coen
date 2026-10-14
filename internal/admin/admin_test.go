@@ -25,8 +25,11 @@ func TestAdminStatusAndSetLevel(t *testing.T) {
 		SetLevel: func(l slog.Level) error { levelSet.Store(l); return nil },
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = srv.Serve(ctx, sock) }()
+	done := make(chan struct{})
+	// Stop the server and wait for it before TempDir's cleanup removes the
+	// directory it is still cleaning up.
+	t.Cleanup(func() { cancel(); <-done })
+	go func() { _ = srv.Serve(ctx, sock); close(done) }()
 
 	// Wait for the socket to appear.
 	deadline := time.Now().Add(2 * time.Second)
@@ -68,8 +71,9 @@ func newTestServer(t *testing.T, srv *Server) string {
 	sock := filepath.Join(dir, "a.sock")
 
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go func() { _ = srv.Serve(ctx, sock) }()
+	done := make(chan struct{})
+	t.Cleanup(func() { cancel(); <-done }) // runs before the RemoveAll above
+	go func() { _ = srv.Serve(ctx, sock); close(done) }()
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
