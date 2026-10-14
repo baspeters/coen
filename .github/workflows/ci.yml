@@ -60,6 +60,9 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: '1.26'
+          # Resolve the newest 1.26.x patch instead of the runner's cached
+          # toolchain, so stdlib advisories fixed upstream don't fail the scan.
+          check-latest: true
       - name: govulncheck
         # Flags known vulnerabilities that the code actually calls. If an
         # upstream (e.g. stdlib) advisory lands before a Go patch is available,
