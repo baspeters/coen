@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/net/http/httpguts"
+
 	"github.com/baspeters/coen/internal/route"
 )
 
@@ -81,6 +83,9 @@ func (c *EdgeConfig) Validate() error {
 	if c.Ingress.Listen == "" {
 		return fmt.Errorf("ingress.listen is required")
 	}
+	if err := c.Ingress.validateHTTP3(); err != nil {
+		return err
+	}
 	for name, v := range map[string]string{"tunnel.listen": c.Tunnel.Listen, "tunnel.ca": c.Tunnel.CA, "tunnel.cert": c.Tunnel.Cert, "tunnel.key": c.Tunnel.Key} {
 		if v == "" {
 			return fmt.Errorf("%s is required", name)
@@ -92,7 +97,7 @@ func (c *EdgeConfig) Validate() error {
 	// A fixed order, so a metrics address that overlaps both is always
 	// reported against the same one.
 	for _, l := range []struct{ name, addr string }{{"tunnel.listen", c.Tunnel.Listen}, {"ingress.listen", c.Ingress.Listen}} {
-		if c.Metrics.Listen != "" && listenersOverlap(c.Metrics.Listen, l.addr) {
+		if c.Metrics.Listen != "" && ListenersOverlap(c.Metrics.Listen, l.addr) {
 			return fmt.Errorf("metrics.listen %q conflicts with %s %q", c.Metrics.Listen, l.name, l.addr)
 		}
 	}
@@ -246,15 +251,49 @@ func (m MetricsConfig) validate() error {
 	return nil
 }
 
+// validateHTTP3 checks the ingress.http3 block: HTTP/3 needs the edge to
+// terminate TLS itself (standalone mode), a usable UDP address, and an
+// Alt-Svc value that is a single header line.
+func (i IngressConfig) validateHTTP3() error {
+	h := i.HTTP3
+	if !h.Enabled {
+		return nil // the other settings are kept but unused, so HTTP/3 can be switched off by enabled alone
+	}
+	if i.Mode != "standalone" {
+		return fmt.Errorf("ingress.http3 needs ingress.mode standalone; behind a reverse proxy, let the proxy serve HTTP/3")
+	}
+	if _, _, err := SplitListenNet("udp", i.HTTP3Listen()); err != nil {
+		name := "ingress.http3.listen"
+		if h.Listen == "" {
+			name = "ingress.listen (HTTP/3 listens there too)"
+		}
+		return fmt.Errorf("%s %q must be host:port with a port from 1 to 65535 or a service name", name, i.HTTP3Listen())
+	}
+	switch strings.ToLower(h.AltSvc) {
+	case "", AltSvcAuto, AltSvcOff:
+		return nil
+	}
+	if !httpguts.ValidHeaderFieldValue(h.AltSvc) || strings.TrimSpace(h.AltSvc) == "" {
+		return fmt.Errorf("ingress.http3.alt_svc must be auto, off, or a single-line header value")
+	}
+	return nil
+}
+
 // SplitListen splits a listen address into host and port, resolving a named
 // port (":https") the way net.Listen does. Port 0 is rejected: a fixed address
 // is needed for something other processes connect to.
 func SplitListen(addr string) (host string, port int, err error) {
+	return SplitListenNet("tcp", addr)
+}
+
+// SplitListenNet is SplitListen for a listener on network ("tcp" or "udp"),
+// which decides how a named port resolves.
+func SplitListenNet(network, addr string) (host string, port int, err error) {
 	host, p, err := net.SplitHostPort(addr)
 	if err != nil {
 		return "", 0, err
 	}
-	port, err = net.LookupPort("tcp", p)
+	port, err = net.LookupPort(network, p)
 	if err != nil || port < 1 {
 		return "", 0, fmt.Errorf("invalid port %q", p)
 	}
@@ -340,12 +379,12 @@ func (e endpoint) overlaps(o endpoint) bool {
 	return false
 }
 
-// listenersOverlap reports whether two listen addresses would compete for the
+// ListenersOverlap reports whether two listen addresses would compete for the
 // same socket. A wildcard host (empty, 0.0.0.0, or ::) overlaps anything,
 // since Go listens dual-stack on all of them; localhost is the loopback
 // addresses; other hostnames are compared as written (see hostIPs).
 // Unparsable addresses never overlap here; they fail elsewhere.
-func listenersOverlap(a, b string) bool {
+func ListenersOverlap(a, b string) bool {
 	ea, okA := parseEndpoint(a)
 	eb, okB := parseEndpoint(b)
 	return okA && okB && ea.overlaps(eb)

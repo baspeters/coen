@@ -7,7 +7,8 @@ import (
 
 func TestRouteStatsNilSafe(t *testing.T) {
 	var r *RouteStats
-	r.opened()
+	r.opened(false)
+	r.opened(true)
 	r.closed()
 	r.Bytes().AddIn(1)
 	r.Bytes().AddOut(2)

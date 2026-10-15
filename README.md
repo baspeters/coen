@@ -8,7 +8,7 @@
 [![Release](https://img.shields.io/github/v/release/baspeters/coen?sort=semver)](https://github.com/baspeters/coen/releases/latest)
 [![Go Reference](https://pkg.go.dev/badge/github.com/baspeters/coen.svg)](https://pkg.go.dev/github.com/baspeters/coen)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![Go 1.25+](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)
+![Go 1.26+](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go&logoColor=white)
 
 Coen is a small, self-hosted tunnel. It publishes one or more private web services to the
 internet over always-on, mutually authenticated connections (one per agent). It covers the
@@ -78,6 +78,9 @@ file, and no third party in the data path.
   the connection through unchanged, so `Upgrade` handshakes and long-lived sockets work.
 - Two ingress modes. The edge can terminate TLS itself with your PEM certificate, or run
   behind an existing nginx vhost as a plain-HTTP upstream.
+- HTTP/3. In standalone mode the edge can also serve clients over HTTP/3 (QUIC), and tells
+  browsers about it with `Alt-Svc`. Agents need no change: each request still reaches them as
+  HTTP/1.1.
 - Public-listener hardening. Global and per-route connection caps, a request-header read
   timeout, an optional idle deadline, and lazy backend dial (an agent is only reached once a
   complete request head has arrived).
@@ -91,8 +94,9 @@ file, and no third party in the data path.
   per-agent series.
 - Simple to operate. One binary with subcommands, YAML config, and a `coen install` that
   writes a hardened systemd unit on Linux or a launchd job on macOS.
-- Small footprint. Pure Go with three third-party dependencies (`cobra`, `yamux`, `yaml.v3`);
-  everything else is the standard library.
+- Small footprint. Pure Go with a handful of third-party dependencies (`cobra`, `yamux`,
+  `yaml.v3`, and `quic-go` plus `golang.org/x/net` for HTTP/3); everything else is the
+  standard library.
 
 ## How it works
 
@@ -236,7 +240,7 @@ sudo systemctl enable --now coen-edge     # or coen-agent
 
 ### With `go install`
 
-Requires Go 1.25 or newer:
+Requires Go 1.26 or newer:
 
 ```bash
 go install github.com/baspeters/coen/cmd/coen@latest
@@ -360,6 +364,52 @@ location / {
 
 Only the tunnel port (`2636`) needs to be reachable by the agent. nginx keeps `:443`, and the
 mTLS tunnel stays end to end, since nginx never sees the tunnel's certificates.
+
+### HTTP/3 for clients
+
+In standalone mode the edge can serve HTTP/3 (QUIC over UDP) next to HTTPS over TCP:
+
+```yaml
+ingress:
+  mode: standalone
+  listen: ":443"
+  tls: { cert: /etc/coen/certs/public.crt, key: /etc/coen/certs/public.key }
+  http3:
+    enabled: true        # UDP :443, the same port number as listen
+    # listen: ":8443"    # a different UDP address, if needed
+    # alt_svc: auto      # auto (default), off, or a literal Alt-Svc value
+```
+
+- **Open UDP 443** in the firewall as well as TCP 443. `coen doctor` checks that the UDP
+  port can be bound, and on Linux whether the kernel's UDP buffers are as large as QUIC asks
+  for (raise `net.core.rmem_max` and `net.core.wmem_max` to at least 7340032 for full speed).
+- **Agents are unchanged.** The edge terminates HTTP/3 and sends each request through the
+  tunnel as an HTTP/1.1 request on its own stream, with `Connection: close`, so every HTTP/3
+  request opens its own connection to the local service. A request body of unknown length
+  goes as `Transfer-Encoding: chunked`.
+- **How clients find it.** Browsers first connect over TCP; the edge adds
+  `Alt-Svc: h3=":443"; ma=86400` to the first response on each connection, unless the service
+  sets its own `Alt-Svc`. `alt_svc: off` leaves responses alone, and any other value is sent
+  as given. A DNS `HTTPS` record lets a browser use HTTP/3 from the first request:
+  `app.example.com. 300 IN HTTPS 1 . alpn="h3"`.
+- **Limits.** `ingress.max_connections` counts each QUIC connection as one, like a TCP
+  connection, and a connection carries at most 32 requests at once (the client queues the
+  rest). A route's `max_connections` counts HTTP/3 requests in flight, each one connection to
+  the service; requests over it wait up to `ingress.read_header_timeout` for a slot, so the
+  service never sees more than that many either way.
+- **Timeouts.** A new connection must start a request within `ingress.read_header_timeout`,
+  and one with no request in progress closes after `ingress.idle_timeout` (`30s` when unset).
+  Keep-alives hold a connection through a quiet response such as server-sent events. A request
+  with no response within `ingress.idle_timeout` gets `504`. On shutdown, requests in flight
+  finish within `drain_timeout` and new connections are refused.
+- **WebSockets** work over both. A browser may open one over HTTP/3 (RFC 9220, extended
+  `CONNECT`); the edge turns it into the usual HTTP/1.1 `Upgrade` towards the agent, so the
+  service sees an ordinary WebSocket handshake. Other `CONNECT` requests get `501`. 0-RTT is
+  off, so a request can never be replayed.
+- **Behind nginx (proxied mode)**, let nginx serve HTTP/3 instead: nginx 1.25 or newer with
+  `listen 443 quic reuseport;`, `http3 on;` and `add_header Alt-Svc 'h3=":443"; ma=86400';` in
+  the vhost. nginx forwards to the edge over plain HTTP as before, so the edge needs no
+  `http3` settings.
 
 ## Examples
 
@@ -511,7 +561,10 @@ metrics:                    # optional; unset disables the endpoint
 | `ingress.tls.cert`, `ingress.tls.key` | path | required in `standalone` | PEM certificate and key for public TLS. Unused in `proxied` mode. |
 | `ingress.max_connections` | int | `0` | Global cap on concurrent ingress connections; over it the edge returns `503`. `0` means unlimited. |
 | `ingress.read_header_timeout` | duration | `10s` | Deadline for reading a request head (slow-loris protection). Always enforced; `0` or unset falls back to the default and cannot disable it. |
-| `ingress.idle_timeout` | duration | `0` | Rolling idle deadline while streaming: a connection with no bytes in either direction for this long is closed. `0` disables it. See the WebSocket note below. |
+| `ingress.idle_timeout` | duration | `0` | Rolling idle deadline while streaming: a connection with no bytes in either direction for this long is closed. `0` disables it. See the WebSocket note below. For HTTP/3 it also closes a connection with no request in progress (`30s` when unset), and a request with no response for this long gets a `504`. |
+| `ingress.http3.enabled` | bool | `false` | Serve HTTP/3 (QUIC over UDP) as well; `standalone` mode only. See [HTTP/3 for clients](#http3-for-clients). |
+| `ingress.http3.listen` | string | `ingress.listen` | UDP address for HTTP/3. |
+| `ingress.http3.alt_svc` | string | `auto` | `Alt-Svc` added to the first response on each TCP connection: `auto` advertises the HTTP/3 port, `off` adds nothing, any other value is sent as given. |
 | `tunnel.listen` | string | required | Address of the mTLS tunnel server the agents dial, e.g. `:2636`. |
 | `tunnel.ca` | path | required | CA bundle that an agent's client certificate must chain to. |
 | `tunnel.cert`, `tunnel.key` | path | required | The edge's server certificate and key for the tunnel. |
@@ -800,7 +853,8 @@ starts at `0`, so `rate()` works from the first scrape.
 | `coen_build_info` | gauge | both | `role`, `version` | Always `1`; carries the build version. |
 | `coen_process_start_time_seconds` | gauge | both | | Daemon start time, Unix seconds. |
 | `coen_streams_active` | gauge | both | `route` | Streams open right now. |
-| `coen_streams_total` | counter | both | `route` | Streams opened. |
+| `coen_streams_total` | counter | both | `route` | Streams opened: one per TCP connection, and one per HTTP/3 request. |
+| `coen_streams_http3_total` | counter | edge | `route` | Of those, the streams for HTTP/3 requests. |
 | `coen_stream_bytes_total` | counter | both | `route`, `direction` | Bytes carried by streams, counted as they flow, so long-lived WebSockets show steady throughput. `in` is client to backend, `out` is backend to client. |
 | `coen_streams_peak` | gauge | both | | Highest concurrent stream count since start. |
 | `coen_draining` | gauge | both | | `1` once shutdown has started and in-flight streams are draining, else `0`. |
@@ -809,7 +863,7 @@ starts at `0`, so `rate()` works from the first scrape.
 | `coen_agent_sessions` | gauge | edge | `fingerprint` | Sessions taking new traffic for that fingerprint (draining ones excluded); above `1` only with `allow_shared_cert`. |
 | `coen_agent_streams_active` | gauge | edge | `fingerprint` | Streams open or being set up right now on that agent's sessions, including draining ones: the load `least_conn` balances on. A stalled agent shows its stream attempts here until they time out. |
 | `coen_agent_streams_total` | counter | edge | `fingerprint` | Streams opened on that agent since start, which shows how load is balanced. |
-| `coen_ingress_rejected_total` | counter | edge | `reason`, `route` | Requests the edge answered itself. Without a route: `max_connections` (503; the cap is checked before anything is read, so this counts every connection turned away, probes included), `bad_request` (400), `no_route` (404). With a route: `route_max_connections` (503), `no_agent` (502), `stream_error` (502). A connection that sends no request at all, such as a TCP health check or a browser preconnect, is not a rejected request and is not counted here. A TLS handshake abandoned partway is a `bad_request`. |
+| `coen_ingress_rejected_total` | counter | edge | `reason`, `route` | Requests the edge answered itself. Without a route: `max_connections` (503; the cap is checked before anything is read, so this counts every connection turned away, probes included), `bad_request` (400), `no_route` (404). With a route: `route_max_connections` (503), `no_agent` (502), `stream_error` (502), `response_timeout` (504: an HTTP/3 request with no response within `ingress.idle_timeout`), `bad_response` (502: an HTTP/3 request whose service sent a response the edge cannot relay, such as a malformed head or a WebSocket upgrade it ignored). A connection that sends no request at all, such as a TCP health check or a browser preconnect, is not a rejected request and is not counted here. A TLS handshake abandoned partway is a `bad_request`. |
 | `coen_ingress_header_timeouts_total` | counter | edge | | Connections closed at `read_header_timeout` without sending any request byte, such as idle browser preconnects. A sudden rise suggests an idle-connection flood. |
 | `coen_tunnel_up` | gauge | agent | | `1` while the tunnel to the edge is established. |
 | `coen_tunnel_reconnects_total` | counter | agent | | Reconnect attempts. |
@@ -848,13 +902,13 @@ Delivered:
 - [x] Bounded graceful draining of in-flight streams on shutdown
 - [x] Prometheus `/metrics` endpoint, per route and per agent
 - [x] Load balancing across several agents per host, with failover
+- [x] HTTP/3 (QUIC) for clients in standalone mode
 
 Still planned (the architecture leaves room for them):
 
 - [ ] ACME and Let's Encrypt automatic certificates for standalone mode
 - [ ] Tunnelling over `:443` (nginx `stream` with `ssl_preread`, or a WebSocket transport)
 - [ ] Certificate rotation and revocation without an edge restart
-- [ ] QUIC and HTTP/3 transport option
 
 ## Contributing
 
@@ -872,7 +926,7 @@ Contributions are welcome, whether it is a bug fix, a roadmap item, docs, or tes
    govulncheck ./...         # scan for known vulnerabilities
    ```
 
-   CI runs the same checks (lint, a Go 1.25 and 1.26 test matrix under `-race`,
+   CI runs the same checks (lint, a Go 1.26 and 1.27 test matrix under `-race`,
    and `govulncheck`) on every push and pull request.
 
 5. Open a pull request that explains what changed and why. Keep it focused, and reference the

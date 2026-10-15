@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -37,7 +40,7 @@ func checkFile(name, path string) Result {
 }
 
 func checkBind(name, addr, adminSocket string) Result {
-	return bindCheck(name, addr, func() (string, bool) {
+	return bindCheck(name, "tcp", addr, func() (string, bool) {
 		// If a coen daemon is answering on the admin socket, the port is almost
 		// certainly held by that running daemon (the normal case when debugging
 		// a live host), not a genuine conflict.
@@ -49,23 +52,48 @@ func checkBind(name, addr, adminSocket string) Result {
 	}, "another process may hold the port, or you lack permission to bind it (:443 needs CAP_NET_BIND_SERVICE)")
 }
 
+// checkUDPBind is checkBind for the HTTP/3 UDP address. A port that cannot
+// be bound counts as held by coen only when the running edge reports serving
+// HTTP/3 on that port: an edge running without HTTP/3 must not hide another
+// QUIC server that holds it.
+func checkUDPBind(name, addr, adminSocket string) Result {
+	return bindCheck(name, "udp", addr, func() (string, bool) {
+		if adminSocket == "" {
+			return "", false
+		}
+		snap, err := admin.Status(adminSocket)
+		return "in use by the running coen edge's HTTP/3", err == nil && snap.HTTP3Listen != "" && config.ListenersOverlap(snap.HTTP3Listen, addr)
+	}, "another process may hold the UDP port, or you lack permission to bind it (:443 needs CAP_NET_BIND_SERVICE)")
+}
+
 // checkMetricsBind checks the metrics address can be bound. When it cannot, it
 // is still fine if a coen daemon of the same role is already serving metrics
 // there. Unlike the tunnel and ingress checks this asks the port itself rather
 // than the admin socket, so a daemon running without metrics, or the other
 // role's daemon on the same port, does not mask a real conflict.
 func checkMetricsBind(addr, role string) Result {
-	return bindCheck("bind: metrics", addr, func() (string, bool) {
+	return bindCheck("bind: metrics", "tcp", addr, func() (string, bool) {
 		return "in use by the running coen " + role + "'s metrics endpoint", metrics.ServesRole(addr, role)
 	}, "")
 }
 
-// bindCheck passes when addr can be bound, or when it cannot but ours reports
-// that the running coen daemon holds it (with a note for the result detail).
-func bindCheck(name, addr string, ours func() (note string, held bool), hint string) Result {
-	ln, err := net.Listen("tcp", addr)
+// bindCheck passes when addr can be bound on network ("tcp" or "udp"), or
+// when it cannot but ours reports that the running coen daemon holds it
+// (with a note for the result detail).
+func bindCheck(name, network, addr string, ours func() (note string, held bool), hint string) Result {
+	var err error
+	if network == "udp" {
+		var pc net.PacketConn
+		if pc, err = net.ListenPacket("udp", addr); err == nil {
+			_ = pc.Close()
+		}
+	} else {
+		var ln net.Listener
+		if ln, err = net.Listen("tcp", addr); err == nil {
+			_ = ln.Close()
+		}
+	}
 	if err == nil {
-		_ = ln.Close()
 		return ok(name, addr)
 	}
 	// An address this host does not have cannot be held by a running daemon,
@@ -254,8 +282,46 @@ func CheckEdge(cfg *config.EdgeConfig) []Result {
 
 	out = append(out, checkBind("bind: tunnel", cfg.Tunnel.Listen, cfg.Admin.Socket))
 	out = append(out, checkBind("bind: ingress", cfg.Ingress.Listen, cfg.Admin.Socket))
+	if cfg.Ingress.HTTP3.Enabled {
+		out = append(out, checkUDPBind("bind: http3 (udp)", cfg.Ingress.HTTP3Listen(), cfg.Admin.Socket))
+		if r, ok := udpBuffers(procNetCore); ok {
+			out = append(out, r)
+		}
+	}
 	if cfg.Metrics.Listen != "" {
 		out = append(out, checkMetricsBind(cfg.Metrics.Listen, "edge"))
 	}
 	return out
+}
+
+// procNetCore is where Linux exposes the socket buffer limits.
+var procNetCore = "/proc/sys/net/core"
+
+// quicBufferSize is the UDP socket buffer quic-go asks for; with a lower
+// kernel limit HTTP/3 works, but throughput on fast links suffers.
+const quicBufferSize = 7 << 20
+
+// udpBuffers reports the kernel's socket buffer limits against what QUIC
+// wants. It returns false where the limits cannot be read (not Linux).
+func udpBuffers(dir string) (Result, bool) {
+	const name = "http3: udp buffers"
+	var low []string
+	for _, f := range []string{"rmem_max", "wmem_max"} {
+		b, err := os.ReadFile(filepath.Join(dir, f))
+		if err != nil {
+			return Result{}, false
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(string(b)))
+		if err != nil {
+			return Result{}, false
+		}
+		if n < quicBufferSize {
+			low = append(low, fmt.Sprintf("net.core.%s=%d", f, n))
+		}
+	}
+	if len(low) == 0 {
+		return ok(name, "large enough for QUIC"), true
+	}
+	// Still a pass: HTTP/3 works, only slower on fast links.
+	return ok(name, strings.Join(low, ", ")+fmt.Sprintf(" is below the %d bytes QUIC asks for; raise it with sysctl for full HTTP/3 throughput", quicBufferSize)), true
 }

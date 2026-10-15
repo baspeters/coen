@@ -25,6 +25,7 @@ backends.
 | [07-proxied-multi-host-tls](07-proxied-multi-host-tls/) | proxied | nginx SNI and per-host certs in front of a multi-agent edge |
 | [08-prometheus-metrics](08-prometheus-metrics/) | standalone | the opt-in `/metrics` endpoint on edge and agent, with a scrape config |
 | [09-load-balancing](09-load-balancing/) | standalone | several agents per host, by separate or shared certificates, with failover |
+| [10-http3](10-http3/) | standalone | HTTP/3 (QUIC) for clients, advertised with `Alt-Svc` |
 
 ## Route matching
 
