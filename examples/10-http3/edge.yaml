@@ -1,0 +1,19 @@
+ingress:
+  mode: standalone          # HTTP/3 needs the edge to terminate TLS itself
+  listen: ":443"            # HTTPS over TCP
+  tls:
+    cert: /etc/coen/certs/public.crt
+    key:  /etc/coen/certs/public.key
+  idle_timeout: 60s         # HTTP/3: idle connections close, and unanswered requests get 504, after this
+  http3:
+    enabled: true           # HTTP/3 over UDP :443 as well
+    # listen: ":8443"       # another UDP address, if :443 is taken
+    # alt_svc: auto         # auto (default), off, or a literal Alt-Svc value
+tunnel:
+  listen: ":2636"
+  ca:   /etc/coen/pki/ca.crt
+  cert: /etc/coen/pki/edge.crt
+  key:  /etc/coen/pki/edge.key
+routes:
+  - host: app.example.com
+    agent_fingerprint: "REPLACE_WITH_AGENT_FINGERPRINT"

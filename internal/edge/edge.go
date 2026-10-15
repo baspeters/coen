@@ -22,6 +22,8 @@ import (
 	"github.com/baspeters/coen/internal/route"
 	"github.com/baspeters/coen/internal/tunnel"
 	"github.com/hashicorp/yamux"
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 )
 
 // routeState is the per-route value stored in the matcher: the agent
@@ -131,6 +133,24 @@ type Edge struct {
 	sem     *semaphore // global ingress connection cap
 	pickMu  sync.Mutex // shared by all routes' least_conn picks
 	drainWG sync.WaitGroup
+	altSvc  atomic.Value // string: Alt-Svc value added to TCP responses ("" for none)
+	pubCert struct {
+		once sync.Once
+		cert tls.Certificate
+		err  error
+	}
+}
+
+// publicCert loads the ingress certificate (standalone mode) once, so TCP
+// and HTTP/3 serve the same one.
+func (e *Edge) publicCert() (tls.Certificate, error) {
+	e.pubCert.once.Do(func() {
+		e.pubCert.cert, e.pubCert.err = tls.LoadX509KeyPair(e.cfg.Ingress.TLS.Cert, e.cfg.Ingress.TLS.Key)
+		if e.pubCert.err != nil {
+			e.pubCert.err = fmt.Errorf("load public cert: %w", e.pubCert.err)
+		}
+	})
+	return e.pubCert.cert, e.pubCert.err
 }
 
 func New(cfg *config.EdgeConfig, log *slog.Logger, state *obs.State) (*Edge, error) {
@@ -143,6 +163,7 @@ func New(cfg *config.EdgeConfig, log *slog.Logger, state *obs.State) (*Edge, err
 	}
 	e := &Edge{cfg: cfg, log: log, state: state, tunTLS: tunnel.ServerTLSConfig(pool, cert), allowed: cfg.AllowedFingerprints(), reg: newRegistry(), sem: newSemaphore(cfg.Ingress.MaxConnections)}
 	e.reg.shared = cfg.SharedFingerprints()
+	e.altSvc.Store("") // set once HTTP/3 is up (see ServeWithHTTP3)
 	state.ExpectAgents(e.allowed)
 	entries := make([]route.Entry[*routeState], 0, len(cfg.Routes))
 	for _, r := range cfg.Routes {
@@ -164,15 +185,23 @@ func (e *Edge) Run(ctx context.Context) error {
 		_ = tunLn.Close()
 		return err
 	}
-	return e.Serve(ctx, tunLn, ingressLn)
+	var h3 net.PacketConn
+	if e.cfg.Ingress.HTTP3.Enabled {
+		if h3, err = net.ListenPacket("udp", e.cfg.Ingress.HTTP3Listen()); err != nil {
+			_ = tunLn.Close()
+			_ = ingressLn.Close()
+			return fmt.Errorf("http3 listen: %w", err)
+		}
+	}
+	return e.ServeWithHTTP3(ctx, tunLn, ingressLn, h3)
 }
 
 func (e *Edge) listenIngress() (net.Listener, error) {
 	switch e.cfg.Ingress.Mode {
 	case "standalone":
-		cert, err := tls.LoadX509KeyPair(e.cfg.Ingress.TLS.Cert, e.cfg.Ingress.TLS.Key)
+		cert, err := e.publicCert()
 		if err != nil {
-			return nil, fmt.Errorf("load public cert: %w", err)
+			return nil, err
 		}
 		ln, err := net.Listen("tcp", e.cfg.Ingress.Listen)
 		if err != nil {
@@ -190,8 +219,34 @@ func (e *Edge) listenIngress() (net.Listener, error) {
 
 // Serve runs the accept loops on the given listeners until ctx is cancelled.
 func (e *Edge) Serve(ctx context.Context, tunLn, ingressLn net.Listener) error {
+	return e.ServeWithHTTP3(ctx, tunLn, ingressLn, nil)
+}
+
+// ServeWithHTTP3 is Serve that also serves HTTP/3 on h3 when it is not nil.
+// It closes h3 when it returns.
+func (e *Edge) ServeWithHTTP3(ctx context.Context, tunLn, ingressLn net.Listener, h3 net.PacketConn) error {
 	e.log.Info("tunnel.listen", "address", tunLn.Addr().String())
 	e.log.Info("ingress.listen", "mode", e.cfg.Ingress.Mode, "address", ingressLn.Addr().String())
+	h3Done := make(chan struct{})
+	if h3 != nil {
+		defer func() { _ = h3.Close() }()
+		srv, tr, ln, err := e.startHTTP3(h3)
+		if err != nil {
+			_ = tunLn.Close()
+			_ = ingressLn.Close()
+			return err
+		}
+		// Advertise it only now that it is served, on the port it is served on.
+		port := 0
+		if ua, ok := h3.LocalAddr().(*net.UDPAddr); ok {
+			port = ua.Port
+		}
+		e.altSvc.Store(e.cfg.Ingress.AltSvcHeaderFor(port))
+		e.log.Info("ingress.listen", "protocol", "http3", "address", h3.LocalAddr().String(), "alt_svc", e.altSvc.Load())
+		go e.serveHTTP3Until(ctx, srv, tr, ln, h3, h3Done)
+	} else {
+		close(h3Done)
+	}
 	go func() {
 		<-ctx.Done()
 		_ = tunLn.Close()
@@ -199,9 +254,32 @@ func (e *Edge) Serve(ctx context.Context, tunLn, ingressLn net.Listener) error {
 	}()
 	go e.acceptTunnel(ctx, tunLn)
 	e.acceptIngress(ctx, ingressLn) // returns once ingressLn is closed
-	e.drain()                       // no new handlers can start now
+	budget := time.Now().Add(e.cfg.Drain.Duration())
+	e.drain() // no new handlers can start now
+	// HTTP/3 requests drain in parallel, within the same budget. Once it is
+	// spent, the agent sessions are closed, which also ends HTTP/3 requests
+	// still waiting on a tunnel (as it ends TCP ones).
+	select {
+	case <-h3Done:
+	case <-time.After(time.Until(budget)):
+	}
 	e.reg.closeAll()
+	<-h3Done
 	return nil
+}
+
+// startHTTP3 sets up HTTP/3 on h3 with the ingress certificate.
+func (e *Edge) startHTTP3(h3 net.PacketConn) (*http3.Server, *quic.Transport, *cappedListener, error) {
+	cert, err := e.publicCert()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	srv, tr, ln, err := e.newHTTP3(cert, h3)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("http3 listen: %w", err)
+	}
+	e.state.SetHTTP3Listen(h3.LocalAddr().String())
+	return srv, tr, ln, nil
 }
 
 // drain waits up to cfg.Drain for in-flight ingress handlers to finish.
@@ -772,6 +850,61 @@ func (e *Edge) handleIngress(conn net.Conn) {
 	}
 	defer rs.sem.release()
 
+	stream, chosen, refused := e.dispatch(rs, connID, conn.RemoteAddr().String(), host, head, log)
+	if refused != nil {
+		errpage.Write(conn, refused.code, refused.reason, refused.detail, connID)
+		_ = conn.Close()
+		return
+	}
+	chosen.stat.Commit()
+	defer chosen.stat.StreamClosed()
+	e.state.StreamOpened(rs.stats)
+	sb := rs.stats.Bytes()
+	log.Debug("stream.open")
+	// Bytes are counted as they cross the tunnel stream, in both directions,
+	// so the edge and the agent agree (an Alt-Svc line the edge adds is not
+	// tunnel traffic).
+	counted := &countingConn{Conn: stream, in: sb.AddIn, out: sb.AddOut}
+	var tunnelSide net.Conn = counted
+	if v, _ := e.altSvc.Load().(string); v != "" {
+		tunnelSide = newAltSvcConn(tunnelSide, v) // advertise HTTP/3
+	}
+	client := proxy.NewIdleConn(conn, e.cfg.Ingress.IdleTimeout.Duration())
+	// The head goes to the agent first: through the pipe, or already sent
+	// with the preamble (version 2), in which case it is counted here.
+	prefix, preSent := head, int64(0)
+	if chosen.v2 { // the head went with the preamble
+		prefix, preSent = nil, int64(len(head))
+		sb.AddIn(preSent)
+	}
+	src := net.Conn(client)
+	if len(prefix) > 0 {
+		src = proxy.WithPrefix(client, prefix)
+	}
+	_, _, _ = proxy.Pipe(src, tunnelSide)
+	e.state.StreamClosed(rs.stats)
+	// Both copies have ended, so the totals are settled: tunnel bytes, as
+	// the metrics count them.
+	log.Debug("stream.closed", "bytes_in", counted.inTotal+preSent, "bytes_out", counted.outTotal)
+}
+
+// refusal is how a request that could not be handed to an agent is answered.
+type refusal struct {
+	code           int
+	reason, detail string
+}
+
+var (
+	noAgent      = &refusal{502, "Bad Gateway", "No agent connected"}
+	streamFailed = &refusal{502, "Bad Gateway", "Tunnel stream failed"}
+)
+
+// dispatch hands a request for host, whose HTTP/1.1 head is head, to one of
+// rs's agents. It returns the agent's stream and session, with the preamble
+// sent and, for a version 2 agent, the head too (for a version 1 agent the
+// caller sends the head). Otherwise it has recorded the failure and returns
+// how to answer the client. The caller holds rs's connection slot.
+func (e *Edge) dispatch(rs *routeState, connID, clientAddr, host string, head []byte, log *slog.Logger) (stream net.Conn, chosen *agentConn, refused *refusal) {
 	// Lazy backend dial: the stream (and thus the agent's Dial) is opened only
 	// now that a complete, valid request head has arrived. The balancer picks a
 	// session; if it turns out to be dead (a silent partition the keepalive has
@@ -781,19 +914,15 @@ func (e *Edge) handleIngress(conn net.Conn) {
 	if len(cands) == 0 {
 		rs.stats.Failure(obs.ReasonNoAgent)
 		log.Warn("ingress.no_agent", "agent_fp", rs.label)
-		errpage.Write(conn, 502, "Bad Gateway", "No agent connected", connID)
-		_ = conn.Close()
-		return
+		return nil, nil, noAgent
 	}
 	// Encode the stream preamble once, before touching any agent: an
 	// oversized one (a huge Host) is a property of the request.
-	preamble, err := tunnel.EncodePreamble(tunnel.Preamble{ConnID: connID, ClientAddr: conn.RemoteAddr().String(), Host: host, EdgeVersion: e.cfg.Version})
+	preamble, err := tunnel.EncodePreamble(tunnel.Preamble{ConnID: connID, ClientAddr: clientAddr, Host: host, EdgeVersion: e.cfg.Version})
 	if err != nil {
 		rs.stats.Failure(obs.ReasonStreamError)
 		log.Warn("stream.preamble_error", "error", err.Error())
-		errpage.Write(conn, 502, "Bad Gateway", "Tunnel stream failed", connID)
-		_ = conn.Close()
-		return
+		return nil, nil, streamFailed
 	}
 	tried := map[*agentConn]bool{} // sessions attempted for this request
 	turn := rs.nextTurn()
@@ -804,8 +933,6 @@ func (e *Edge) handleIngress(conn net.Conn) {
 	// When every attempt found the agent draining or refusing, there is no
 	// agent to serve the request (no_agent); otherwise it is a stream error.
 	attempts, unavailable := 0, 0
-	var stream net.Conn
-	var chosen *agentConn
 	for chosen == nil {
 		wait := time.Until(deadline)
 		var c *agentConn
@@ -831,14 +958,11 @@ func (e *Edge) handleIngress(conn net.Conn) {
 			if unavailable == attempts {
 				rs.stats.Failure(obs.ReasonNoAgent)
 				log.Warn("ingress.no_agent", "agent_fp", rs.label, "reason", "all agents draining, refusing, or gone", "attempts", attempts, "ended", why)
-				errpage.Write(conn, 502, "Bad Gateway", "No agent connected", connID)
-			} else {
-				rs.stats.Failure(obs.ReasonStreamError)
-				log.Warn("stream.no_session", "agent_fp", rs.label, "attempts", attempts, "unavailable", unavailable, "ended", why)
-				errpage.Write(conn, 502, "Bad Gateway", "Tunnel stream failed", connID)
+				return nil, nil, noAgent
 			}
-			_ = conn.Close()
-			return
+			rs.stats.Failure(obs.ReasonStreamError)
+			log.Warn("stream.no_session", "agent_fp", rs.label, "attempts", attempts, "unavailable", unavailable, "ended", why)
+			return nil, nil, streamFailed
 		}
 		attempts++
 		// An attempt waits at most acceptWait, so a stalled agent leaves time
@@ -879,30 +1003,8 @@ func (e *Edge) handleIngress(conn net.Conn) {
 			// The agent may already have the request: never send it twice.
 			rs.stats.Failure(obs.ReasonStreamError)
 			log.Warn("stream.send_error", "agent_fp", c.fp, "error", err.Error())
-			errpage.Write(conn, 502, "Bad Gateway", "Tunnel stream failed", connID)
-			_ = conn.Close()
-			return
+			return nil, nil, streamFailed
 		}
 	}
-	chosen.stat.Commit()
-	defer chosen.stat.StreamClosed()
-	e.state.StreamOpened(rs.stats)
-	sb := rs.stats.Bytes()
-	log.Debug("stream.open")
-	client := proxy.NewIdleConn(conn, e.cfg.Ingress.IdleTimeout.Duration())
-	// The head goes to the agent first: through the pipe, or already sent
-	// with the preamble (version 2), in which case it is counted here.
-	prefix, preSent := head, int64(0)
-	if chosen.v2 { // the head went with the preamble
-		prefix, preSent = nil, int64(len(head))
-		sb.AddIn(preSent)
-	}
-	src := net.Conn(client)
-	if len(prefix) > 0 {
-		src = proxy.WithPrefix(client, prefix)
-	}
-	in, out, _ := proxy.PipeProgress(src, stream, sb.AddIn, sb.AddOut)
-	in += preSent
-	e.state.StreamClosed(rs.stats)
-	log.Debug("stream.closed", "bytes_in", in, "bytes_out", out)
+	return stream, chosen, nil
 }

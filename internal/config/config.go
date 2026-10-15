@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -46,12 +47,61 @@ type TLSFiles struct {
 }
 
 type IngressConfig struct {
-	Mode              string   `yaml:"mode"`
-	Listen            string   `yaml:"listen"`
-	TLS               TLSFiles `yaml:"tls"`
-	MaxConnections    int      `yaml:"max_connections"`
-	ReadHeaderTimeout Duration `yaml:"read_header_timeout"`
-	IdleTimeout       Duration `yaml:"idle_timeout"`
+	Mode              string      `yaml:"mode"`
+	Listen            string      `yaml:"listen"`
+	TLS               TLSFiles    `yaml:"tls"`
+	MaxConnections    int         `yaml:"max_connections"`
+	ReadHeaderTimeout Duration    `yaml:"read_header_timeout"`
+	IdleTimeout       Duration    `yaml:"idle_timeout"`
+	HTTP3             HTTP3Config `yaml:"http3"`
+}
+
+// HTTP3Config serves HTTP/3 (QUIC over UDP) to clients next to the TCP
+// ingress, in standalone mode. The edge terminates it and forwards each
+// request to the agent as HTTP/1.1, so agents need no change.
+type HTTP3Config struct {
+	Enabled bool `yaml:"enabled"`
+	// Listen is the UDP address; empty means the same as ingress.listen.
+	Listen string `yaml:"listen"`
+	// AltSvc is the Alt-Svc header the edge adds to the first response on
+	// each TCP connection, so browsers learn they can switch: "auto" (the
+	// default) advertises the HTTP/3 port, "off" adds nothing, and any other
+	// value is sent as given.
+	AltSvc string `yaml:"alt_svc"`
+}
+
+// Alt-Svc settings for HTTP3Config.AltSvc.
+const (
+	AltSvcAuto = "auto"
+	AltSvcOff  = "off"
+)
+
+// HTTP3Listen returns the UDP address HTTP/3 listens on.
+func (i IngressConfig) HTTP3Listen() string {
+	if i.HTTP3.Listen != "" {
+		return i.HTTP3.Listen
+	}
+	return i.Listen
+}
+
+// AltSvcHeaderFor returns the Alt-Svc value to add to TCP responses when
+// HTTP/3 is served on UDP port port, or "" for none (HTTP/3 off, or
+// alt_svc: off). auto advertises port. It expects a validated config.
+func (i IngressConfig) AltSvcHeaderFor(port int) string {
+	if !i.HTTP3.Enabled {
+		return ""
+	}
+	switch strings.ToLower(i.HTTP3.AltSvc) {
+	case AltSvcOff:
+		return ""
+	case "", AltSvcAuto:
+		if port < 1 {
+			return ""
+		}
+		return fmt.Sprintf(`h3=":%d"; ma=86400`, port)
+	default:
+		return i.HTTP3.AltSvc
+	}
 }
 
 // EdgeRoute maps a host pattern to the agent(s) (by client-cert fingerprint)

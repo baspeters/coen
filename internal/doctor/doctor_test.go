@@ -193,6 +193,13 @@ func TestCheckEdgeStandaloneValidPublicCert(t *testing.T) {
 	if !found || !r.OK {
 		t.Fatalf("expected public cert check to pass, found=%v %+v", found, r)
 	}
+	if _, found := findResult(results, "bind: http3 (udp)"); found {
+		t.Fatal("HTTP/3 off: no UDP check")
+	}
+	cfg.Ingress.HTTP3 = config.HTTP3Config{Enabled: true, Listen: "127.0.0.1:0"}
+	if r, found := findResult(CheckEdge(cfg), "bind: http3 (udp)"); !found || !r.OK {
+		t.Fatalf("HTTP/3 on: UDP check found=%v %+v", found, r)
+	}
 }
 
 func TestCheckEdgeStandaloneMissingPublicCert(t *testing.T) {
