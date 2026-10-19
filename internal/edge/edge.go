@@ -700,7 +700,7 @@ func (e *Edge) tryAgent(c *agentConn, preamble, head []byte, wait time.Duration)
 	}
 	// The agent has the stream. Once the request goes out it may run it, so
 	// a failure from here on is never retried.
-	if _, err := s.Write(append(preamble, head...)); err != nil {
+	if _, err := sendHead(s, append(preamble, head...)); err != nil {
 		if gone() {
 			return fail(attemptUnknown, evict, err)
 		}
@@ -708,6 +708,10 @@ func (e *Edge) tryAgent(c *agentConn, preamble, head []byte, wait time.Duration)
 	}
 	return s, attemptOK, nil
 }
+
+// sendHead writes a version 2 stream's preamble and request head; tests
+// replace it to make the write fail.
+var sendHead = func(s net.Conn, b []byte) (int, error) { return s.Write(b) }
 
 // streamRefused reports a write error from a stream the agent reset or closed.
 func streamRefused(err error) bool {
