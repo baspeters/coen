@@ -17,8 +17,11 @@ client --HTTPS--> edge :443 (terminates TLS) --mTLS--> agent --> 127.0.0.1:8080
 
 ## Wire it up
 
-1. On the edge and agent hosts, create the PKI and note the agent fingerprint
-   (`coen cert agent` prints it). Put that fingerprint into `edge.yaml` under
+1. On one machine, create the PKI: `coen cert init`, then
+   `coen cert edge --host edge.example.com` and `coen cert agent --name app-agent`
+   (it prints the agent's fingerprint). Copy `ca.crt`, `edge.crt` and `edge.key`
+   to the edge, and `ca.crt`, `agent.crt` and `agent.key` to the agent; keep
+   `ca.key` off both. Put the fingerprint into `edge.yaml` under
    `routes[0].agent_fingerprint`.
 2. Copy `edge.yaml` to the edge host (`/etc/coen/edge.yaml`) and `agent.yaml` to
    the private host (`/etc/coen/agent.yaml`); fix the paths and `edge.address`.
@@ -32,4 +35,5 @@ curl https://app.example.com/
 coen status --socket /run/coen/edge.sock
 ```
 
-`coen status` lists the connected agent.
+`coen status` lists the connected agent (it uses the `admin.socket` set in
+`edge.yaml`).

@@ -9,3 +9,5 @@ routes:
     service: 127.0.0.1:8080
   - host: api.example.com
     service: 127.0.0.1:9090
+admin:
+  socket: /run/coen/agent.sock   # for `coen status` and `coen doctor`

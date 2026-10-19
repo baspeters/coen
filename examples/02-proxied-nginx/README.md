@@ -25,5 +25,6 @@ nginx -t && systemctl reload nginx
 curl https://app.example.com/
 ```
 
-The edge log shows `ingress.accept host=app.example.com`. A request with an
+With `log.level: debug`, the edge log shows `ingress.accept` with
+`host=app.example.com`. A request with an
 unknown `Host` gets a `404` from coen, not from nginx.

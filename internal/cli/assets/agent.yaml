@@ -3,6 +3,7 @@ edge:
   ca:   /etc/coen/pki/ca.crt
   cert: /etc/coen/pki/agent.crt
   key:  /etc/coen/pki/agent.key
+  # edge_fingerprint: "SHA256:..."   # optional: pin the edge's certificate
 routes:
   - host: app.example.com
     service: 127.0.0.1:8080

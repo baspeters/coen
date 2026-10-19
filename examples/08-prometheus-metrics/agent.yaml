@@ -10,3 +10,5 @@ routes:
     service: 127.0.0.1:9000
 metrics:
   listen: 127.0.0.1:9465      # a different port, so edge and agent can share a host
+admin:
+  socket: /run/coen/agent.sock   # for `coen status` and `coen doctor`

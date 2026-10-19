@@ -7,3 +7,5 @@ tunnel:
   cert: /etc/coen/pki/edge.crt
   key:  /etc/coen/pki/edge.key
 # Routes live in edge.d/ (one file per host/agent).
+admin:
+  socket: /run/coen/edge.sock   # for `coen status` and `coen doctor`

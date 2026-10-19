@@ -30,9 +30,14 @@ nginx.conf           # two TLS vhosts forwarding to the shared edge upstream
 
 ## Wire it up
 
-1. Obtain per-host certs (for example, `certbot -d app.example.com -d
-   api.example.com`).
+1. Obtain one cert per host, for example `certbot certonly --nginx -d
+   app.example.com` and `certbot certonly --nginx -d api.example.com` (one
+   `certbot` run with both `-d` flags makes a single cert for both names).
 2. Put the `map` block in `http { }` and both `server { }` blocks in your sites
    config, then `nginx -t && systemctl reload nginx`.
 3. Fill each agent's fingerprint into the matching `edge.d/*.yaml`, deploy the two
-   agent configs, and start the edge and both agents.
+   agent configs, and start the edge and both agents. `coen cert agent` always writes `agent.crt` and `agent.key`, so on the CA host rename
+   each pair before issuing the next, for example
+   `coen cert agent --name agent-a && mv /etc/coen/pki/agent.crt /etc/coen/pki/agent-a.crt && mv /etc/coen/pki/agent.key /etc/coen/pki/agent-a.key`,
+   and the same for `agent-b`.
+   Copy `ca.crt` and that agent's pair to its host (never `ca.key`).

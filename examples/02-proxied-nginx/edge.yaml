@@ -9,3 +9,5 @@ tunnel:
 routes:
   - host: app.example.com
     agent_fingerprint: "REPLACE_WITH_AGENT_FINGERPRINT"
+admin:
+  socket: /run/coen/edge.sock   # for `coen status` and `coen doctor`

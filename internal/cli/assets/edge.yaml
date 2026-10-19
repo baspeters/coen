@@ -7,16 +7,24 @@ ingress:
   max_connections: 0        # global cap on concurrent ingress conns; 0 = unlimited
   read_header_timeout: 10s  # bound on reading the HTTP request head
   idle_timeout: 0           # rolling idle deadline while streaming; 0 = disabled
+  # http3:                  # optional HTTP/3 (QUIC) for clients; standalone mode only
+  #   enabled: true         # also serve UDP on ingress.listen (open UDP 443 in the firewall)
+  #   alt_svc: auto         # auto | off | a literal Alt-Svc value
 tunnel:
   listen: ":2636"
   ca:   /etc/coen/pki/ca.crt
   cert: /etc/coen/pki/edge.crt
   key:  /etc/coen/pki/edge.key
 routes:
-  # each host is owned by exactly one agent (by client-cert fingerprint).
+  # each host is owned by one or more agents (by client-cert fingerprint).
   - host: app.example.com
+    # `coen cert agent` prints the fingerprint; until it is set, every agent is refused.
     agent_fingerprint: "REPLACE_WITH_AGENT_FINGERPRINT"
     max_connections: 0      # optional per-route cap; 0 = unlimited
+    # agent_fingerprints: ["SHA256:...", "SHA256:..."]  # instead of agent_fingerprint: load-balance
+    # balance: least_conn   # least_conn (default) | round_robin
+    # allow_shared_cert: false  # true: several agents may run with one certificate
+    # http3: false          # keep this host on TCP (Windows sign-in); see README
 drain_timeout: 15s          # finish in-flight streams up to this long on shutdown
 log:
   level: info

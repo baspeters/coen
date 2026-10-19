@@ -17,8 +17,12 @@ routes:
       - "REPLACE_WITH_AGENT_1_FINGERPRINT"
       - "REPLACE_WITH_AGENT_2_FINGERPRINT"
     balance: least_conn
-  # Any number of agents running with one shared certificate, in turn.
+  # Up to 256 agents running with one shared certificate, in turn.
   - host: app.example.com
     agent_fingerprint: "REPLACE_WITH_SHARED_AGENT_FINGERPRINT"
     allow_shared_cert: true
     balance: round_robin
+admin:
+  socket: /run/coen/edge.sock   # for `coen status` and `coen doctor`
+metrics:
+  listen: 127.0.0.1:9464   # see 08-prometheus-metrics; keep it private

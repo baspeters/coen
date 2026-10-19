@@ -8,3 +8,5 @@ routes:
     service: 127.0.0.1:8080
   - host: intranet.example.com
     service: 127.0.0.1:8081
+admin:
+  socket: /run/coen/agent.sock   # for `coen status` and `coen doctor`

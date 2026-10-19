@@ -3,7 +3,8 @@
 The standalone edge from example 01, also serving HTTP/3 (QUIC over UDP). The
 edge terminates HTTP/3 and sends each request through the tunnel as HTTP/1.1,
 so the agent needs nothing new. A second host, `intranet.example.com`, stays on
-TCP (see [Keeping a host off HTTP/3](#keeping-a-host-off-http3)).
+TCP (see [Keeping a host off HTTP/3](#keeping-a-host-off-http3)). Connections to
+the service are reused across a client's HTTP/3 requests, as they are over TCP.
 
 ```
 client --HTTP/3 (UDP 443)---\
@@ -13,7 +14,8 @@ client --HTTPS (TCP 443)----/
 
 ## Prerequisites
 
-- Everything from example 01.
+- Everything from example 01, with a certificate covering both
+  `app.example.com` and `intranet.example.com`.
 - UDP 443 open in the firewall, next to TCP 443.
 - On Linux, for full speed, socket buffers as large as QUIC asks for:
 
@@ -21,8 +23,8 @@ client --HTTPS (TCP 443)----/
   sudo sysctl -w net.core.rmem_max=7340032 net.core.wmem_max=7340032
   ```
 
-  (persist it in `/etc/sysctl.d/`). `coen doctor --role edge` reports the current
-  values.
+  (persist it in `/etc/sysctl.d/`). On Linux, `coen doctor --role edge` reports
+  whether they are large enough.
 
 ## How clients switch to HTTP/3
 
@@ -83,6 +85,11 @@ counts the HTTP/3 requests those streams carried.
   ordinary HTTP/1.1 upgrade.
 - HTTP/3 requests reuse connections to the service, as TCP clients do: a
   connection carries one HTTP/3 connection's requests in turn, never another's.
+  Only requests that may be sent twice (`GET`, `PUT`, `DELETE` and the like, or
+  one with an `Idempotency-Key`) take a kept one; a `POST` opens a fresh one, so
+  it is never sent twice.
+- With `idle_timeout` set (60s here), a request with no response in that time
+  gets a `504`.
 - 0-RTT is off, so a captured request cannot be replayed by anyone else.
 - Behind nginx (proxied mode), let nginx serve HTTP/3 instead; see the
   [HTTP/3 section](../../README.md#http3-for-clients) of the main README.

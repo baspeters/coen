@@ -12,3 +12,5 @@ reconnect:
   min_backoff: 1s
   max_backoff: 30s
 drain_timeout: 30s            # finish in-flight streams for up to 30s on shutdown
+admin:
+  socket: /run/coen/agent.sock   # for `coen status` and `coen doctor`

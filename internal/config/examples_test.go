@@ -26,3 +26,14 @@ func TestExampleConfigsAreValid(t *testing.T) {
 		}
 	}
 }
+
+// TestInstallTemplatesAreValid loads the configs that `coen install` and the
+// packages ship, so they never drift from the schema either.
+func TestInstallTemplatesAreValid(t *testing.T) {
+	if _, err := LoadEdge("../cli/assets/edge.yaml"); err != nil {
+		t.Errorf("edge template: %v", err)
+	}
+	if _, err := LoadAgent("../cli/assets/agent.yaml"); err != nil {
+		t.Errorf("agent template: %v", err)
+	}
+}
