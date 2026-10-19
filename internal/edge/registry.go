@@ -80,10 +80,22 @@ type registry struct {
 	pending map[string]int              // per fingerprint: open sessions not (yet) pooled
 	shared  map[string]bool
 	closing bool // closeAll has run: no new session is tracked or pooled
+	// joinedCh is closed (and replaced) each time a session joins the pool,
+	// waking requests that wait for an agent (see Edge.dispatch).
+	joinedCh chan struct{}
 }
 
 func newRegistry() *registry {
-	return &registry{byFP: make(map[string][]*agentConn), all: make(map[*yamux.Session]*tracked), joined: make(map[string]int), pending: make(map[string]int), shared: map[string]bool{}}
+	return &registry{byFP: make(map[string][]*agentConn), all: make(map[*yamux.Session]*tracked), joined: make(map[string]int), pending: make(map[string]int), shared: map[string]bool{}, joinedCh: make(chan struct{})}
+}
+
+// joins returns a channel closed when the next session joins the pool. Take
+// it before looking for a session, so one that joins in between is not
+// missed.
+func (r *registry) joins() <-chan struct{} {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.joinedCh
 }
 
 // tracked is the registry's record of one open session.
@@ -126,6 +138,8 @@ func (r *registry) registerConn(fp string, c *agentConn) (registration, int) {
 		return refusedCap, 0
 	}
 	r.byFP[fp] = append(live, c)
+	close(r.joinedCh)
+	r.joinedCh = make(chan struct{})
 	if t := r.all[c.sess]; t != nil && !t.joined {
 		t.joined = true
 		r.joined[fp]++

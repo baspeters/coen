@@ -13,6 +13,7 @@ reconnect backoff, on one edge and one agent. HTTP/3 adds a few of its own; see
 | `ingress.idle_timeout` | `120s` | Rolling idle deadline while streaming; a connection with no traffic for this long is closed. `0` disables it. |
 | `routes[].max_connections` | `256` / `64` | Per-route cap, so one backend cannot consume all global slots. `0` means unlimited. |
 | `drain_timeout` (edge and agent) | `30s` | On shutdown, stop accepting and finish in-flight streams for up to this long before force-closing. Unset or `0` uses the default, `15s`. |
+| `agent_wait` (edge) | `5s` (default) | A request whose route has no agent (one restarting) waits this long for one before it gets `502`. `0` answers at once. |
 | `reconnect.min_backoff` / `max_backoff` (agent) | `1s` / `30s` | Bounds of the agent's exponential reconnect backoff (with jitter); these are the defaults. |
 
 ## Lazy backend dial

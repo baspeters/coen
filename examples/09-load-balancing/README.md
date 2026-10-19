@@ -35,7 +35,9 @@ new streams, which may go to other agents.
 
 A stopping agent asks the edge to take it out of the pool before it drains, and if an
 agent's tunnel dies the edge evicts that session and retries the request on another one, so
-restarting agents one at a time loses no requests. The handoff needs the edge and the agents
+restarting agents one at a time loses no requests. A single agent can also be reloaded or
+upgraded without a gap, with `systemctl reload coen-agent` (see the README's
+[Seamless agent reloads and upgrades](../../README.md#seamless-agent-reloads-and-upgrades)). The handoff needs the edge and the agents
 at v0.4.0 or later, and the agent's `drain_timeout` at least `2s` (the default `15s` is fine). To rotate an agent's certificate, add the new fingerprint to `agent_fingerprints`,
 switch the agent to the new certificate, then drop the old fingerprint; each edge config
 change takes effect on an edge restart.

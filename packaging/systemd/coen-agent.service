@@ -4,7 +4,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+# notify: the agent reports when it is ready, and `systemctl reload` replaces
+# the agent process without a gap (a new process takes over as the main one).
+Type=notify
 ExecStart=/usr/bin/coen agent --config /etc/coen/agent.yaml
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure

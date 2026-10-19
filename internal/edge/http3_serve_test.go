@@ -27,7 +27,7 @@ import (
 func h3Edge(st *obs.State) (*Edge, *routeState) {
 	rs := &routeState{fingerprints: []string{"A"}, label: "A", stats: st.Route("app.test")}
 	return &Edge{
-		cfg:    &config.EdgeConfig{},
+		cfg:    &config.EdgeConfig{AgentWait: config.NewDuration(0)}, // no-agent cases answer at once
 		log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		state:  st,
 		reg:    newRegistry(),

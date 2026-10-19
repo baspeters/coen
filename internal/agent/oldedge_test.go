@@ -58,11 +58,12 @@ func TestShutdownAgainstOlderEdge(t *testing.T) {
 		<-sess.CloseChan()
 	}()
 
+	st := obs.NewState("agent")
 	a, err := New(&config.AgentConfig{
 		Edge:      config.EdgeRef{Address: edgeLn.Addr().String(), CA: caPath, Cert: certPath, Key: keyPath},
 		Routes:    []config.AgentRoute{{Host: "*", Service: "127.0.0.1:1"}},
 		Reconnect: config.ReconnectConfig{MinBackoff: config.Duration(10 * time.Millisecond), MaxBackoff: config.Duration(50 * time.Millisecond)},
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)), obs.NewState("agent"))
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)), st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,6 +75,19 @@ func TestShutdownAgainstOlderEdge(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("agent never connected")
 	}
+	// The edge has its side; wait for the agent's, so that the shutdown
+	// below is that of a serving agent, not of a handshake.
+	for end := time.Now().Add(3 * time.Second); !st.Snapshot().TunnelConnected; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatal("the agent's tunnel never came up")
+		}
+	}
+	// A replacement waits until this session has closed: an older edge
+	// refuses its certificate as a duplicate until then.
+	retiredAt := make(chan time.Time, 1)
+	if !a.SetOnRetired(func() { retiredAt <- time.Now() }) {
+		t.Fatal("before the shutdown the hook must be accepted")
+	}
 	start := time.Now()
 	cancel()
 	select {
@@ -83,5 +97,13 @@ func TestShutdownAgainstOlderEdge(t *testing.T) {
 	}
 	if d := time.Since(start); d > time.Second {
 		t.Fatalf("shutdown against an older edge took %v; it must not wait for a drain acknowledgement", d)
+	}
+	select {
+	case <-retiredAt:
+	default:
+		t.Fatal("the hook never ran")
+	}
+	if a.SetOnRetired(func() {}) {
+		t.Fatal("after the shutdown the hook must be refused")
 	}
 }

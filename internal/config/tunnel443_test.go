@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestShareIngressValidation(t *testing.T) {
@@ -75,5 +76,17 @@ func TestEdgeProxyValidation(t *testing.T) {
 	c.Edge.Proxy = "http://%zz"
 	if c.Edge.ProxyURL() != nil {
 		t.Fatal("an unparsable proxy: nil URL")
+	}
+}
+
+func TestAgentWaitValidation(t *testing.T) {
+	c := standaloneEdge()
+	c.AgentWait = NewDuration(-time.Second)
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "agent_wait must not be negative") {
+		t.Fatalf("got %v", err)
+	}
+	c.AgentWait = NewDuration(0)
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
 	}
 }

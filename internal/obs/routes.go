@@ -96,6 +96,7 @@ type RouteStats struct {
 	total    atomic.Int64 // all streams
 	totalH3  atomic.Int64 // edge: of which for HTTP/3 requests
 	reqH3    atomic.Int64 // edge: HTTP/3 requests sent to the service, over those streams
+	waits    atomic.Int64 // edge: requests that waited for an agent (see AgentWait)
 	bytes    [byteShards]byteShard
 	next     atomic.Uint32 // round-robin shard assignment for new streams
 	failures reasonCounts
@@ -119,6 +120,15 @@ func (r *RouteStats) HTTP3Request() {
 		return
 	}
 	r.reqH3.Add(1)
+}
+
+// AgentWait counts a request that found no agent to take it and waited for
+// one (agent_wait), whether one came or not.
+func (r *RouteStats) AgentWait() {
+	if r == nil {
+		return
+	}
+	r.waits.Add(1)
 }
 
 func (r *RouteStats) closed() {
@@ -190,6 +200,7 @@ type RouteSnapshot struct {
 	Total    int64 // all streams
 	TotalH3  int64 // of which for HTTP/3 requests (edge)
 	ReqH3    int64 // HTTP/3 requests sent over them (edge)
+	Waits    int64 // requests that waited for an agent (edge)
 	BytesIn  int64
 	BytesOut int64
 	Failures ReasonCounts
@@ -262,6 +273,7 @@ func (s *State) routeSnapshots() []RouteSnapshot {
 			Total:    all,
 			TotalH3:  h3,
 			ReqH3:    r.reqH3.Load(),
+			Waits:    r.waits.Load(),
 			BytesIn:  in,
 			BytesOut: outB,
 			Failures: r.failures.snapshot(),

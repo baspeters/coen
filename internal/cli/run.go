@@ -79,7 +79,15 @@ func newAgentCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runDaemon(log, lv, state, daemonOpts{socket: cfg.Admin.Socket, metricsAddr: cfg.Metrics.Listen}, func() (string, error) { return config.AgentLogLevel(cfgPath) }, a)
+			// Started by a running agent to replace it: wait for the go-ahead
+			// before binding anything or connecting (see replace.go). systemd
+			// may already send a reload to this process meanwhile; ignore it
+			// until runDaemon handles SIGHUP, rather than die of it.
+			signal.Ignore(syscall.SIGHUP)
+			if err := awaitTurn(log); err != nil {
+				return err
+			}
+			return runDaemon(log, lv, state, daemonOpts{socket: cfg.Admin.Socket, metricsAddr: cfg.Metrics.Listen, agent: a}, func() (string, error) { return config.AgentLogLevel(cfgPath) }, a)
 		},
 	}
 	cmd.Flags().StringVar(&cfgPath, "config", "/etc/coen/agent.yaml", "config file")
@@ -88,8 +96,9 @@ func newAgentCmd() *cobra.Command {
 
 // daemonOpts are the side-server settings around a daemon's Run.
 type daemonOpts struct {
-	socket      string // admin socket path; empty disables it
-	metricsAddr string // metrics.listen; empty disables metrics
+	socket      string       // admin socket path; empty disables it
+	metricsAddr string       // metrics.listen; empty disables metrics
+	agent       agentRetirer // the agent, which SIGHUP can replace (see replace.go); nil for the edge
 }
 
 // runDaemon runs r with the admin socket, the optional metrics endpoint, and
@@ -140,7 +149,14 @@ func runDaemon(log *slog.Logger, lv *slog.LevelVar, state *obs.State, opts daemo
 			return fmt.Errorf("metrics listen: %w", err)
 		}
 	}
-	return serveDaemon(ctx, log, lv, state, opts.socket, m, hup, reloadLevel, r)
+	var rep *replacer
+	if opts.agent != nil {
+		rep = newReplacer(ctx, log, state, opts.agent, cancel)
+	}
+	if err := serveDaemon(ctx, log, lv, state, opts.socket, m, hup, reloadLevel, rep, r); err != nil {
+		return err
+	}
+	return rep.failed()
 }
 
 // drainingPredecessor reports whether addr is held by a coen daemon of the same
@@ -205,8 +221,9 @@ func (m metricsBinding) await(ctx context.Context, log *slog.Logger, role string
 // metrics endpoint deliberately outlive ctx: they stay up until r.Run returns,
 // so `coen status` and Prometheus can watch in-flight streams drain to zero.
 //
-// hup delivers SIGHUP for log-level reloads.
-func serveDaemon(ctx context.Context, log *slog.Logger, lv *slog.LevelVar, state *obs.State, socket string, m metricsBinding, hup chan os.Signal, reloadLevel func() (string, error), r runner) error {
+// hup delivers SIGHUP: with rep set it replaces the agent process (see
+// replace.go), otherwise it reloads the log level.
+func serveDaemon(ctx context.Context, log *slog.Logger, lv *slog.LevelVar, state *obs.State, socket string, m metricsBinding, hup chan os.Signal, reloadLevel func() (string, error), rep *replacer, r runner) error {
 	lifetime, stop := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	// Defers run last-in first-out: stop the side servers once r.Run has
@@ -249,6 +266,14 @@ func serveDaemon(ctx context.Context, log *slog.Logger, lv *slog.LevelVar, state
 			case <-lifetime.Done():
 				return
 			case <-hup:
+				if rep != nil {
+					go func() {
+						if err := rep.replace(); err != nil {
+							log.Warn("reload.failed", "error", err.Error(), "impact", "this agent keeps running")
+						}
+					}()
+					continue
+				}
 				level, err := reloadLevel()
 				if err != nil {
 					log.Warn("config.reload_error", "error", err.Error())
@@ -265,5 +290,6 @@ func serveDaemon(ctx context.Context, log *slog.Logger, lv *slog.LevelVar, state
 		}
 	}()
 
+	notifyReady(log)
 	return r.Run(ctx)
 }

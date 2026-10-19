@@ -91,7 +91,9 @@ file, and no third party in the data path.
 - Graceful shutdown. On SIGINT or SIGTERM the edge and agent stop accepting new work and drain
   in-flight streams up to a configurable timeout before exiting. A stopping agent first asks
   the edge to take it out of its routes' pools, so new connections go to the remaining agents
-  and a rolling restart loses no requests.
+  and a rolling restart loses no requests. Even a lone agent can be reloaded or upgraded without
+  a gap (`systemctl reload coen-agent`), and the edge holds requests briefly while a route has
+  no agent (`agent_wait`), for agents that are restarting or reconnecting.
 - Automatic reconnect. The agent retries with exponential backoff and jitter; yamux
   keepalives notice dead peers behind NAT.
 - Diagnostics that actually help. Named connectivity events in the logs, a `conn_id` that ties
@@ -622,9 +624,12 @@ coen install edge  --unit-dir /etc/systemd/system --config-dir /etc/coen --bin /
 coen install edge  --force                                    # replace an existing unit; the config is never overwritten
 ```
 
-Sending `SIGHUP`, or running `systemctl reload`, re-reads a running daemon's config and
-hot-applies the `log.level` without a restart. Other changes (routes, listeners, caps,
-timeouts, fingerprints) are read at startup and take effect only when the process restarts.
+Sending `SIGHUP`, or running `systemctl reload`, re-reads a running edge's config and
+hot-applies the `log.level` without a restart; its other settings (routes, listeners, caps,
+timeouts, fingerprints) are read at startup and take effect only when it restarts. On an agent
+under the packaged systemd unit, `systemctl reload` instead replaces the agent process without
+a gap, which applies every config change and a newly installed binary (see
+[Seamless agent reloads and upgrades](#seamless-agent-reloads-and-upgrades)).
 
 ## Configuration reference
 
@@ -654,9 +659,12 @@ timeouts, fingerprints) are read at startup and take effect only when the proces
   placeholder left in a route starts fine and then refuses every agent. `coen doctor` goes
   further at runtime (file presence, certificate validity, DNS, reachability, a live mTLS
   handshake, clock skew, and each route's backend).
-- **Reload.** `SIGHUP` (or `systemctl reload`) re-reads the file and hot-applies `log.level`
-  only. Routes, listeners, caps, timeouts, and fingerprints are read at startup and change
-  only on restart.
+- **Reload.** On the edge, `SIGHUP` (or `systemctl reload`) re-reads the file and
+  hot-applies `log.level` only; routes, listeners, caps, timeouts, and fingerprints are read at
+  startup and change only on restart. On an agent under the packaged (`Type=notify`) systemd
+  unit, `systemctl reload` replaces the process with one that reads the whole file (see
+  [Seamless agent reloads and upgrades](#seamless-agent-reloads-and-upgrades)); without that
+  unit, `SIGHUP` hot-applies `log.level` only, as on the edge.
 - **Drop-in route files (`.d`).** Routes may live inline under `routes:` and/or in a
   `<name>.d/` directory next to the config file: `edge.yaml` uses `edge.d/`, `agent.yaml` uses
   `agent.d/`. Each drop-in is a routes-only fragment (a top-level `routes:` list and nothing
@@ -722,6 +730,7 @@ routes:                     # host -> owning agent(s) (by client-cert fingerprin
     allow_shared_cert: false # true: several agents may run with one certificate
     http3: true             # false: keep this host off HTTP/3 (see HTTP/3 for clients)
 drain_timeout: 15s          # finish in-flight streams up to this long on shutdown
+agent_wait: 5s              # a request with no agent to take it waits this long; 0 = off
 log:
   level: info               # trace, debug, info, warn, or error
   # format:                 # unset autodetects (journal under systemd, text otherwise); text|json|journal
@@ -755,6 +764,7 @@ metrics:                    # optional; unset disables the endpoint
 | `routes[].max_connections` | int | `0` | Per-route cap on concurrent connections to the service. `0` means unlimited. Over TCP each client connection holds one slot, and a connection over the cap gets `503` at once. Over HTTP/3 each open connection to the service holds one, including those kept idle for the client's next request; a request over the cap takes the slot of a kept one, or waits up to `ingress.read_header_timeout` for a slot, then gets `503`. A TCP connection can also take a kept HTTP/3 connection's slot. |
 | `routes[].http3` | bool | `true` | `false` keeps the route's hosts off HTTP/3, for services with connection-based auth; see [HTTP/3 for clients](#http3-for-clients). Rejected in `proxied` mode; no effect unless `ingress.http3.enabled`. |
 | `drain_timeout` | duration | `15s` | On shutdown, finish in-flight streams for up to this long before force-closing. `0` or unset uses the default (15s). |
+| `agent_wait` | duration | `5s` | How long a request waits for an agent when its route has none to take it (none connected, or all draining or refusing), before it gets `502`. Covers an agent restarting or reloading, and agents reconnecting after an edge restart. `0` answers `502` at once. A waiting request holds its connection and route slot; an HTTP/3 request stops waiting when its client goes away. |
 | `log.level` | string | `info` | `trace`, `debug`, `info`, `warn`, or `error`. |
 | `log.format` | string | autodetect | `text`, `json`, or `journal`. Unset autodetects: `journal` under systemd (journald), otherwise `text`. See [Log formats](#log-formats). |
 | `admin.socket` | path | (unset) | Unix socket for `coen status` and `coen doctor`'s live-tunnel check. When unset, the admin socket is disabled. A small `<socket>.lock` file next to it coordinates a restart that overlaps a draining instance and is left in place. |
@@ -832,7 +842,7 @@ The edge answers with a plain HTTP status when it cannot forward:
 | `404` | No route matched the `Host`. |
 | `421` | HTTP/3 only: a request for a route with `http3: false` on a connection made for another host. |
 | `501` | HTTP/3 only: a `CONNECT` request that is not a WebSocket. |
-| `502` | A route matched but its agent is offline, a tunnel stream could not be opened, or the agent could not reach its backend; over HTTP/3 also when the service sent a response the edge cannot relay. |
+| `502` | A route matched but no agent took the request within `agent_wait` (none connected, or all draining), a tunnel stream could not be opened, or the agent could not reach its backend; over HTTP/3 also when the service sent a response the edge cannot relay. |
 | `503` | A per-route connection cap was reached (over HTTP/3, after waiting for a slot), or, over TCP, the global cap. |
 | `504` | HTTP/3 only: no response within `ingress.idle_timeout` (when it is set). |
 
@@ -899,6 +909,8 @@ routes:
   request waits at most 30 seconds in all; when no other agent is left to try, the last one
   may use all of it, unless it has just been found unresponsive. When no agent is live, the client gets a `502`.
 - **Rolling restarts.** Restart agents one at a time; the others carry the traffic meanwhile.
+  A single agent can be restarted or upgraded without a gap too, with `systemctl reload` (see
+  [Seamless agent reloads and upgrades](#seamless-agent-reloads-and-upgrades)).
 - **Certificate rotation.** List the new fingerprint next to the old one in
   `agent_fingerprints`, then switch agents to the new certificate one at a time, and finally
   drop the old fingerprint. The edge reads routes only at startup, so each of the two config
@@ -935,6 +947,45 @@ On the edge, new HTTP/3 connections are refused at once during the drain, and co
 services kept for HTTP/3 clients are closed rather than reused. Under systemd, a
 `drain_timeout` above 90 seconds also needs a larger `TimeoutStopSec` (for example in a
 `systemctl edit coen-edge` drop-in), or systemd kills the process at its 90-second default.
+
+### Seamless agent reloads and upgrades
+
+A stopping agent asks the edge to take it out of its pool, so with several agents on a route
+the others take the traffic at once. With one agent there is no one to hand over to:
+`systemctl restart` stops the agent (draining for up to `drain_timeout`) before it starts the
+new one, and the edge has no agent for that long. `systemctl reload` avoids the gap:
+
+```bash
+sudo systemctl reload coen-agent     # apply config changes, or a newly installed binary
+```
+
+1. The running agent starts a new process from the same binary path (a newly installed binary
+   is picked up) with the same arguments. It loads the config and certificates and reports
+   back; if it fails (a broken config, say), the running agent logs `reload.failed` with the
+   reason and carries on, so a bad change never takes the agent down.
+2. The running agent asks the edge to take it out of its pool (as on a graceful stop) and,
+   once the edge has, tells systemd that the new process is now the service's main process and
+   gives it the go-ahead (`reload.handed_over`).
+3. The new process connects (`reload.taking_over`). The edge holds requests that arrive in the
+   meantime, usually a few tens of milliseconds, for up to `agent_wait`, so none fails. If the
+   new process dies before this point, or systemd cannot be told about it, the old one exits
+   with an error once it has drained, so systemd restarts the service instead of leaving it
+   without an agent.
+4. The old process finishes its in-flight requests within `drain_timeout` and exits.
+   Long-lived requests (server-sent events, WebSockets) stay on it until they end or
+   `drain_timeout` cuts them; clients reconnect to the new process.
+
+This needs the systemd unit with `Type=notify`, which the `.deb`, `.rpm` and `.apk` packages
+and `coen install` ship from v0.5.1 on (rewrite an older unit with `coen install agent
+--force`, or edit it), and an edge from v0.5.1 on for a reload without a gap. An edge from
+v0.4.0 on does the handoff in step 2 but has no `agent_wait`, so the few requests in step 3
+can fail. An older edge refuses the new process as a duplicate while the old one is connected,
+so the new process connects only once the old one has finished draining (up to
+`drain_timeout`), and requests in between fail, as with a restart. Without a
+`Type=notify` unit, `SIGHUP` only re-reads `log.level`, and `systemctl restart` keeps the gap.
+A `Type=notify` unit also needs a binary from v0.5.1 on: an older one never reports that it is
+ready, so systemd gives up on starting it after `TimeoutStartSec` (90 seconds). Roll the binary
+and the unit back together.
 
 See [`examples/`](examples/) for an example configuration of each variant.
 
@@ -999,7 +1050,9 @@ bolted on.
 Logging uses `log/slog` in text, JSON, or a journald-friendly `journal` format (see [Log formats](#log-formats)). Each step is a named event, for example `edge.dial`,
 `agent.tls_handshake`, `tunnel.established`, `agent.connected`, `ingress.accept`,
 `stream.open`, `stream.closed`, and `reconnect.scheduled`, with timing and the concrete reason
-on failure. The edge stamps its build version into each stream preamble, and the agent logs a
+on failure. A seamless agent reload logs `reload.start`, `reload.successor_ready`,
+`reload.handed_over` and `reload.taking_over` (or `reload.failed` with the reason), and a request
+that waits for an agent `ingress.agent_wait` (at `debug`). The edge stamps its build version into each stream preamble, and the agent logs a
 one-time `version.mismatch` warning if the edge is running a different version, so an
 accidental one-sided upgrade is visible in the logs.
 
@@ -1054,9 +1107,10 @@ that each route's service accepts a connection. A port held by the role's own ru
 counts as a pass. `--json` prints the results as JSON. With a daemon running it auto-detects the role, and
 when the agent's tunnel is already up it verifies edge reachability and mTLS from that live
 tunnel rather than opening a fresh connection, so a health check never perturbs the serving
-edge. Only the `log.level` can be
-changed on a running daemon (with `systemctl reload` or `SIGHUP`); other changes need a
-restart.
+edge. On the edge only the `log.level` can be changed on a running daemon (with `systemctl
+reload` or `SIGHUP`); other changes need a restart. An agent under the packaged unit applies
+every change with `systemctl reload` (see
+[Seamless agent reloads and upgrades](#seamless-agent-reloads-and-upgrades)).
 
 ### Prometheus metrics
 
@@ -1101,6 +1155,7 @@ starts at `0`, so `rate()` works from the first scrape.
 | `coen_agent_streams_active` | gauge | edge | `fingerprint` | Streams open or being set up right now on that agent's sessions, including draining ones and connections kept open between HTTP/3 requests: the load `least_conn` balances on. A stalled agent shows its stream attempts here until they time out. |
 | `coen_agent_streams_total` | counter | edge | `fingerprint` | Streams opened on that agent since start, which shows how load is balanced. Like `coen_streams_total`, it counts connections to the service, not the HTTP/3 requests carried on a reused one. |
 | `coen_ingress_rejected_total` | counter | edge | `reason`, `route` | Requests the edge answered itself. Without a route: `max_connections` (503 over TCP; over HTTP/3 the QUIC connection is closed instead; the cap is checked before anything is read, so this counts every connection turned away, probes included), `bad_request` (400), `no_route` (404). With a route: `route_max_connections` (503; over HTTP/3 after waiting up to `read_header_timeout` for a slot), `no_agent` (502), `stream_error` (502), `response_timeout` (504: an HTTP/3 request with no response within `ingress.idle_timeout`), `bad_response` (502: an HTTP/3 request whose service sent a response the edge cannot relay, such as a malformed head or a WebSocket upgrade it ignored), `http3_off` (421: an HTTP/3 request for a route with `http3: false`, on a connection made for another host). A connection that sends no request at all, such as a TCP health check or a browser preconnect, is not a rejected request and is not counted here. A TLS handshake that fails, or is abandoned after the ClientHello, is a `bad_request`. |
+| `coen_ingress_agent_waits_total` | counter | edge | `route` | Requests that found no agent to take them and waited for one (`agent_wait`), whether one came or not; those still without one when the wait ran out also count as `no_agent` in `coen_ingress_rejected_total`. A rise during agent restarts is expected. |
 | `coen_ingress_header_timeouts_total` | counter | edge | | TCP ingress connections closed at `read_header_timeout` without sending any request byte, such as idle browser preconnects (idle HTTP/3 connections are not counted). A sudden rise suggests an idle-connection flood. |
 | `coen_tunnel_up` | gauge | agent | | `1` while the tunnel to the edge is established. |
 | `coen_tunnel_reconnects_total` | counter | agent | | Reconnect attempts. |
@@ -1117,6 +1172,9 @@ sudo coen install agent    # writes /etc/systemd/system/coen-agent.service and /
 # Edit the configs, put your PKI under /etc/coen/pki, then enable the service.
 sudo systemctl enable --now coen-edge      # on the public host
 sudo systemctl enable --now coen-agent     # on the private host
+
+# Later: apply an agent config change, or a new binary, without a gap.
+sudo systemctl reload coen-agent
 ```
 
 The unit runs `/usr/local/bin/coen` unless you pass `--bin "$(command -v coen)"` (a
@@ -1129,7 +1187,9 @@ If you installed a `.deb`, `.rpm` or `.apk` package, skip `coen install`: the pa
 ships both units (in `/usr/lib/systemd/system`, running `/usr/bin/coen`) and example configs.
 A unit written to `/etc/systemd/system` would override the package's, and with the default
 `--bin` it would point at a binary that does not exist. A package upgrade replaces the binary
-but does not restart a running service; run `sudo systemctl restart coen-<role>` afterwards.
+but does not restart a running service: run `sudo systemctl reload coen-agent` on an agent (no
+gap; see [Seamless agent reloads and upgrades](#seamless-agent-reloads-and-upgrades)), and
+`sudo systemctl restart coen-edge` on an edge.
 
 The systemd unit runs as a dedicated non-root `coen` user. `coen install` does
 not create it (that would mutate system accounts); if it is missing, install

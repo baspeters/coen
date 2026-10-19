@@ -169,10 +169,9 @@ func TestDialProxyTimeoutsAndFailures(t *testing.T) {
 		t.Fatalf("a cancelled dial: %v", err)
 	}
 
-	// Nothing listens there: the proxy cannot be reached.
-	ln, _ := net.Listen("tcp", "127.0.0.1:0")
-	gone := ln.Addr().String()
-	_ = ln.Close()
+	// Nothing listens there (port 1, so that no other test can hold it
+	// meanwhile): the proxy cannot be reached.
+	gone := "127.0.0.1:1"
 	if _, err := netx.Dial(context.Background(), addr, &url.URL{Scheme: "http", Host: gone}, time.Second); err == nil || !strings.Contains(err.Error(), "dial proxy") {
 		t.Fatalf("got %v", err)
 	}
@@ -181,5 +180,21 @@ func TestDialProxyTimeoutsAndFailures(t *testing.T) {
 	dead := proxytest.Start(t, proxytest.Options{})
 	if _, err := netx.Dial(context.Background(), gone, dead.URL, time.Second); err == nil || !strings.Contains(err.Error(), "502") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// The test proxy answers anything but CONNECT with 405.
+func TestProxyRefusesOtherMethods(t *testing.T) {
+	p := proxytest.Start(t, proxytest.Options{})
+	c, err := net.Dial("tcp", p.URL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_, _ = io.WriteString(c, "GET http://example/ HTTP/1.1\r\nHost: example\r\n\r\n")
+	b := make([]byte, 12)
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadFull(c, b); err != nil || string(b) != "HTTP/1.1 405" {
+		t.Fatalf("got %q %v", b, err)
 	}
 }

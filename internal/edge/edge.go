@@ -140,7 +140,10 @@ type Edge struct {
 	drainWG sync.WaitGroup
 	altSvc  atomic.Value // string: Alt-Svc value added to TCP responses ("" for none)
 	h3pool  *h3Pool      // tunnel streams kept between a connection's HTTP/3 requests
-	pubCert struct {
+	// serveCtx is ServeWithHTTP3's context (a context.Context): waits for an
+	// agent end when it does (see stopping).
+	serveCtx atomic.Value
+	pubCert  struct {
 		once sync.Once
 		cert tls.Certificate
 		err  error
@@ -210,6 +213,10 @@ func (e *Edge) Run(ctx context.Context) error {
 	}
 	return e.ServeWithHTTP3(ctx, tunLn, ingressLn, h3)
 }
+
+// ListenIngress opens the ingress listener Run would, for a caller that
+// serves it with Serve or ServeWithHTTP3 itself.
+func (e *Edge) ListenIngress() (net.Listener, error) { return e.listenIngress() }
 
 func (e *Edge) listenIngress() (net.Listener, error) {
 	switch e.cfg.Ingress.Mode {
@@ -291,6 +298,7 @@ func (e *Edge) Serve(ctx context.Context, tunLn, ingressLn net.Listener) error {
 // It closes h3 when it returns. tunLn may be nil when agents come in only on
 // the ingress (tunnel.share_ingress).
 func (e *Edge) ServeWithHTTP3(ctx context.Context, tunLn, ingressLn net.Listener, h3 net.PacketConn) error {
+	e.serveCtx.Store(ctx)
 	closeTun := func() {
 		if tunLn != nil {
 			_ = tunLn.Close()
@@ -696,7 +704,7 @@ func (e *Edge) tryAgent(c *agentConn, preamble, head []byte, wait time.Duration)
 	}
 	// The agent has the stream. Once the request goes out it may run it, so
 	// a failure from here on is never retried.
-	if _, err := s.Write(append(preamble, head...)); err != nil {
+	if _, err := sendHead(s, append(preamble, head...)); err != nil {
 		if gone() {
 			return fail(attemptUnknown, evict, err)
 		}
@@ -704,6 +712,10 @@ func (e *Edge) tryAgent(c *agentConn, preamble, head []byte, wait time.Duration)
 	}
 	return s, attemptOK, nil
 }
+
+// sendHead writes a version 2 stream's preamble and request head; tests
+// replace it to make the write fail.
+var sendHead = func(s net.Conn, b []byte) (int, error) { return s.Write(b) }
 
 // streamRefused reports a write error from a stream the agent reset or closed.
 func streamRefused(err error) bool {
@@ -940,7 +952,7 @@ func (e *Edge) handleIngress(conn net.Conn) {
 	}
 	defer rs.sem.release()
 
-	stream, chosen, refused := e.dispatch(rs, connID, conn.RemoteAddr().String(), host, head, log)
+	stream, chosen, refused := e.dispatch(context.Background(), rs, connID, conn.RemoteAddr().String(), host, head, log)
 	if refused != nil {
 		errpage.Write(conn, refused.code, refused.reason, refused.detail, connID)
 		_ = conn.Close()
@@ -1022,7 +1034,81 @@ var (
 // sent and, for a version 2 agent, the head too (for a version 1 agent the
 // caller sends the head). Otherwise it has recorded the failure and returns
 // how to answer the client. The caller holds rs's connection slot.
-func (e *Edge) dispatch(rs *routeState, connID, clientAddr, host string, head []byte, log *slog.Logger) (stream net.Conn, chosen *agentConn, refused *refusal) {
+//
+// When the route has no agent to take the request (none connected, or all
+// draining or refusing), it waits up to agent_wait for one (an agent
+// restarting, or reconnecting after an edge restart) before giving up, or
+// until ctx or the edge's shutdown ends the wait. It tries again as soon as
+// a session joins, every agentRetry meanwhile (an agent that refused one
+// stream, with a briefly full queue, may take the next), and once more when
+// the wait runs out.
+func (e *Edge) dispatch(ctx context.Context, rs *routeState, connID, clientAddr, host string, head []byte, log *slog.Logger) (stream net.Conn, chosen *agentConn, refused *refusal) {
+	var until time.Time // set on the first wait
+	for {
+		joined := e.reg.joins() // before looking, so a join in between is seen
+		stream, chosen, why := e.dispatchOnce(rs, connID, clientAddr, host, head, log)
+		switch why {
+		case "":
+			return stream, chosen, nil
+		case noSessionWhy, noAgentWhy: // waiting may help
+		default:
+			return nil, nil, streamFailed // dispatchOnce has counted and logged it
+		}
+		wait := e.cfg.AgentWaitDuration()
+		if until.IsZero() && wait > 0 {
+			until = time.Now().Add(wait)
+			rs.stats.AgentWait()
+			log.Debug("ingress.agent_wait", "agent_fp", rs.label, "wait", wait.String())
+		}
+		if left := time.Until(until); left > 0 {
+			t := time.NewTimer(min(left, agentRetry))
+			select {
+			case <-joined:
+				t.Stop()
+				continue // an agent joined: try again
+			case <-t.C:
+				continue // try again; once the wait has run out, a last time
+			case <-ctx.Done():
+				t.Stop()
+			case <-e.stopping():
+				t.Stop()
+			}
+		}
+		rs.stats.Failure(obs.ReasonNoAgent)
+		if why == noSessionWhy {
+			log.Warn("ingress.no_agent", "agent_fp", rs.label)
+		} else {
+			log.Warn("ingress.no_agent", "agent_fp", rs.label, "reason", "all agents draining, refusing, or gone")
+		}
+		return nil, nil, noAgent
+	}
+}
+
+// agentRetry is how often a request waiting for an agent tries again
+// without a new session joining.
+const agentRetry = 250 * time.Millisecond
+
+// stopping is closed once the edge starts shutting down; nil (never) before
+// it serves.
+func (e *Edge) stopping() <-chan struct{} {
+	if ctx, ok := e.serveCtx.Load().(context.Context); ok {
+		return ctx.Done()
+	}
+	return nil
+}
+
+// Reasons dispatchOnce gives for not handing a request to an agent, when
+// waiting for one may help: none connected, or every one tried was
+// draining, refusing, or gone. Any other reason is a stream failure it has
+// already counted and logged.
+const (
+	noSessionWhy = "no session"
+	noAgentWhy   = "no agent"
+)
+
+// dispatchOnce is one round of dispatch: it tries the route's live sessions
+// and returns the stream, or why it could not (see noSessionWhy).
+func (e *Edge) dispatchOnce(rs *routeState, connID, clientAddr, host string, head []byte, log *slog.Logger) (stream net.Conn, chosen *agentConn, why string) {
 	// Lazy backend dial: the stream (and thus the agent's Dial) is opened only
 	// now that a complete, valid request head has arrived. The balancer picks a
 	// session; if it turns out to be dead (a silent partition the keepalive has
@@ -1030,9 +1116,7 @@ func (e *Edge) dispatch(rs *routeState, connID, clientAddr, host string, head []
 	// one is tried. Nothing has been sent to the client yet, so retrying is safe.
 	cands := e.untried(rs, nil)
 	if len(cands) == 0 {
-		rs.stats.Failure(obs.ReasonNoAgent)
-		log.Warn("ingress.no_agent", "agent_fp", rs.label)
-		return nil, nil, noAgent
+		return nil, nil, noSessionWhy
 	}
 	// Encode the stream preamble once, before touching any agent: an
 	// oversized one (a huge Host) is a property of the request.
@@ -1040,7 +1124,7 @@ func (e *Edge) dispatch(rs *routeState, connID, clientAddr, host string, head []
 	if err != nil {
 		rs.stats.Failure(obs.ReasonStreamError)
 		log.Warn("stream.preamble_error", "error", err.Error())
-		return nil, nil, streamFailed
+		return nil, nil, "preamble error"
 	}
 	tried := map[*agentConn]bool{} // sessions attempted for this request
 	turn := rs.nextTurn()
@@ -1069,18 +1153,17 @@ func (e *Edge) dispatch(rs *routeState, connID, clientAddr, host string, head []
 			// Out of sessions or out of time. If every attempt found the
 			// agent draining, refusing, or gone, there is no agent to serve
 			// the request (no_agent); otherwise it is a tunnel stream error.
-			why := "nothing left to try"
+			ended := "nothing left to try"
 			if wait <= 0 {
-				why = "deadline passed"
+				ended = "deadline passed"
 			}
 			if unavailable == attempts {
-				rs.stats.Failure(obs.ReasonNoAgent)
-				log.Warn("ingress.no_agent", "agent_fp", rs.label, "reason", "all agents draining, refusing, or gone", "attempts", attempts, "ended", why)
-				return nil, nil, noAgent
+				log.Debug("stream.no_agent", "agent_fp", rs.label, "attempts", attempts, "ended", ended)
+				return nil, nil, noAgentWhy
 			}
 			rs.stats.Failure(obs.ReasonStreamError)
-			log.Warn("stream.no_session", "agent_fp", rs.label, "attempts", attempts, "unavailable", unavailable, "ended", why)
-			return nil, nil, streamFailed
+			log.Warn("stream.no_session", "agent_fp", rs.label, "attempts", attempts, "unavailable", unavailable, "ended", ended)
+			return nil, nil, "stream error"
 		}
 		attempts++
 		// An attempt waits at most acceptWait, so a stalled agent leaves time
@@ -1121,8 +1204,8 @@ func (e *Edge) dispatch(rs *routeState, connID, clientAddr, host string, head []
 			// The agent may already have the request: never send it twice.
 			rs.stats.Failure(obs.ReasonStreamError)
 			log.Warn("stream.send_error", "agent_fp", c.fp, "error", err.Error())
-			return nil, nil, streamFailed
+			return nil, nil, "send error"
 		}
 	}
-	return stream, chosen, nil
+	return stream, chosen, ""
 }
