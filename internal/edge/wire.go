@@ -15,6 +15,11 @@ type wireConn struct {
 	// reads, and handleIngress checks it on the goroutine that performed them
 	// (before the proxy goroutines start), so a plain bool suffices.
 	sawBytes bool
+	// tunnel is set during the TLS handshake when the client offered the
+	// tunnel's ALPN protocol on an ingress shared with the tunnel (see
+	// ingressTLSConfig); it is read after the handshake, on the same
+	// goroutine.
+	tunnel bool
 }
 
 func (c *wireConn) Read(b []byte) (int, error) {

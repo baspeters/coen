@@ -12,6 +12,7 @@ ingress:
   #   alt_svc: auto         # auto | off | a literal Alt-Svc value
 tunnel:
   listen: ":2636"
+  # share_ingress: true     # agents may also connect to ingress.listen (standalone mode)
   ca:   /etc/coen/pki/ca.crt
   cert: /etc/coen/pki/edge.crt
   key:  /etc/coen/pki/edge.key

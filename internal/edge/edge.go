@@ -182,19 +182,28 @@ func New(cfg *config.EdgeConfig, log *slog.Logger, state *obs.State) (*Edge, err
 }
 
 func (e *Edge) Run(ctx context.Context) error {
-	tunLn, err := tls.Listen("tcp", e.cfg.Tunnel.Listen, e.tunTLS)
-	if err != nil {
-		return fmt.Errorf("tunnel listen: %w", err)
+	var tunLn net.Listener // none when agents only come in on a shared ingress
+	if e.cfg.Tunnel.Listen != "" {
+		ln, err := tls.Listen("tcp", e.cfg.Tunnel.Listen, e.tunTLS)
+		if err != nil {
+			return fmt.Errorf("tunnel listen: %w", err)
+		}
+		tunLn = ln
+	}
+	closeTun := func() {
+		if tunLn != nil {
+			_ = tunLn.Close()
+		}
 	}
 	ingressLn, err := e.listenIngress()
 	if err != nil {
-		_ = tunLn.Close()
+		closeTun()
 		return err
 	}
 	var h3 net.PacketConn
 	if e.cfg.Ingress.HTTP3.Enabled {
 		if h3, err = net.ListenPacket("udp", e.cfg.Ingress.HTTP3Listen()); err != nil {
-			_ = tunLn.Close()
+			closeTun()
 			_ = ingressLn.Close()
 			return fmt.Errorf("http3 listen: %w", err)
 		}
@@ -215,12 +224,62 @@ func (e *Edge) listenIngress() (net.Listener, error) {
 		}
 		// wireListener lets handleIngress tell an empty connection from an
 		// abandoned TLS handshake (see closedWithoutRequest).
-		return tls.NewListener(wireListener{ln}, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}), nil
+		return tls.NewListener(wireListener{ln}, e.ingressTLSConfig(cert)), nil
 	case "proxied":
 		return net.Listen("tcp", e.cfg.Ingress.Listen)
 	default:
 		return nil, fmt.Errorf("unknown ingress mode %q", e.cfg.Ingress.Mode)
 	}
+}
+
+// ingressTLSConfig is the standalone ingress's TLS config: the public
+// certificate, and, with tunnel.share_ingress, the tunnel's mTLS config for
+// a client that offers the tunnel's ALPN protocol, an agent that dials the
+// ingress port (see takeAgent). Browsers never offer it, and an agent always
+// does, so the two are told apart before any certificate is chosen.
+func (e *Edge) ingressTLSConfig(cert tls.Certificate) *tls.Config {
+	cfg := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+	if e.cfg.Tunnel.ShareIngress {
+		cfg.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			if !slices.Contains(hello.SupportedProtos, tunnel.ALPNv2) {
+				return nil, nil
+			}
+			if wc, ok := hello.Conn.(*wireConn); ok {
+				wc.tunnel = true
+			}
+			return e.tunTLS, nil
+		}
+	}
+	return cfg
+}
+
+// takeAgent finishes the TLS handshake of a connection on an ingress shared
+// with the tunnel, by deadline, and reports whether it is an agent's, which
+// it then serves as if it had arrived on tunnel.listen, with the same
+// accounting. Any other connection is left to the ingress, with the rest of
+// the same deadline for its request head; a failed handshake is kept by the
+// tls.Conn and returned by its first read, as before.
+func (e *Edge) takeAgent(conn net.Conn, deadline time.Time) bool {
+	if !e.cfg.Tunnel.ShareIngress {
+		return false
+	}
+	tc, ok := conn.(*tls.Conn)
+	if !ok {
+		return false
+	}
+	wc, ok := tc.NetConn().(*wireConn)
+	if !ok {
+		return false
+	}
+	// A read deadline only, as handleIngress sets: the handshake is what
+	// the first read of the request head would run.
+	_ = tc.SetReadDeadline(deadline)
+	_ = tc.Handshake()
+	if !wc.tunnel {
+		return false
+	}
+	go e.serveAgent(conn) // its own lifetime: not an ingress handler to drain
+	return true
 }
 
 // Serve runs the accept loops on the given listeners until ctx is cancelled.
@@ -229,16 +288,27 @@ func (e *Edge) Serve(ctx context.Context, tunLn, ingressLn net.Listener) error {
 }
 
 // ServeWithHTTP3 is Serve that also serves HTTP/3 on h3 when it is not nil.
-// It closes h3 when it returns.
+// It closes h3 when it returns. tunLn may be nil when agents come in only on
+// the ingress (tunnel.share_ingress).
 func (e *Edge) ServeWithHTTP3(ctx context.Context, tunLn, ingressLn net.Listener, h3 net.PacketConn) error {
-	e.log.Info("tunnel.listen", "address", tunLn.Addr().String())
+	closeTun := func() {
+		if tunLn != nil {
+			_ = tunLn.Close()
+		}
+	}
+	if tunLn != nil {
+		e.log.Info("tunnel.listen", "address", tunLn.Addr().String())
+	}
+	if e.cfg.Tunnel.ShareIngress {
+		e.log.Info("tunnel.listen", "address", ingressLn.Addr().String(), "shared_with", "ingress")
+	}
 	e.log.Info("ingress.listen", "mode", e.cfg.Ingress.Mode, "address", ingressLn.Addr().String())
 	h3Done := make(chan struct{})
 	if h3 != nil {
 		defer func() { _ = h3.Close() }()
 		srv, tr, ln, err := e.startHTTP3(h3)
 		if err != nil {
-			_ = tunLn.Close()
+			closeTun()
 			_ = ingressLn.Close()
 			return err
 		}
@@ -255,10 +325,12 @@ func (e *Edge) ServeWithHTTP3(ctx context.Context, tunLn, ingressLn net.Listener
 	}
 	go func() {
 		<-ctx.Done()
-		_ = tunLn.Close()
+		closeTun()
 		_ = ingressLn.Close()
 	}()
-	go e.acceptTunnel(ctx, tunLn)
+	if tunLn != nil {
+		go e.acceptTunnel(ctx, tunLn)
+	}
 	e.acceptIngress(ctx, ingressLn) // returns once ingressLn is closed
 	budget := time.Now().Add(e.cfg.Drain.Duration())
 	e.drain() // no new handlers can start now
@@ -797,23 +869,34 @@ func (e *Edge) acceptIngress(ctx context.Context, ln net.Listener) {
 func (e *Edge) handleIngress(conn net.Conn) {
 	connID := obs.NewID()
 	log := e.log.With("conn_id", connID, "client_addr", conn.RemoteAddr().String())
+	// The public listener always gets a read/handshake deadline (slow-loris
+	// protection): the TLS handshake and the request head together must
+	// arrive within it. A non-positive config value falls back to the
+	// default rather than disabling it.
+	deadline := time.Now().Add(readHeaderDeadline(e.cfg.Ingress.ReadHeaderTimeout.Duration()))
 
 	if !e.sem.tryAcquire() {
+		// The 503 below completes the handshake anyway: an agent on a shared
+		// ingress port is not a client to turn away, nor to answer in HTTP.
+		if e.takeAgent(conn, deadline) {
+			return
+		}
 		e.state.Failure(obs.ReasonMaxConnections)
 		log.Warn("ingress.rejected", "reason", "max_connections")
 		// Bound the 503 write: on the TLS ingress it first runs the handshake,
 		// which would otherwise wait forever on a client that sends nothing.
-		_ = conn.SetDeadline(time.Now().Add(readHeaderDeadline(e.cfg.Ingress.ReadHeaderTimeout.Duration())))
+		_ = conn.SetDeadline(deadline)
 		errpage.Write(conn, 503, "Service Unavailable", "Too many connections", connID)
 		_ = conn.Close()
 		return
 	}
+	if e.takeAgent(conn, deadline) {
+		e.sem.release() // a tunnel session holds no ingress slot
+		return
+	}
 	defer e.sem.release()
 
-	// The public listener always gets a read/handshake deadline (slow-loris
-	// protection); a non-positive config value falls back to the default rather
-	// than disabling it.
-	_ = conn.SetReadDeadline(time.Now().Add(readHeaderDeadline(e.cfg.Ingress.ReadHeaderTimeout.Duration())))
+	_ = conn.SetReadDeadline(deadline)
 	head, host, err := readRequestHead(conn, maxHeaderBytes)
 	if errors.Is(err, errNoRequest) && closedWithoutRequest(conn) {
 		// Connected and closed, reset, or idled out without asking for

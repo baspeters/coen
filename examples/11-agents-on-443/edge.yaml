@@ -1,0 +1,17 @@
+ingress:
+  mode: standalone          # sharing needs the edge to terminate TLS itself
+  listen: ":443"
+  tls:
+    cert: /etc/coen/certs/public.crt
+    key:  /etc/coen/certs/public.key
+tunnel:
+  share_ingress: true       # agents may also connect to :443
+  listen: ":2636"           # optional with share_ingress; kept for agents older than v0.4.0
+  ca:   /etc/coen/pki/ca.crt
+  cert: /etc/coen/pki/edge.crt
+  key:  /etc/coen/pki/edge.key
+routes:
+  - host: app.example.com
+    agent_fingerprints: ["REPLACE_WITH_DIRECT_AGENT_FINGERPRINT", "REPLACE_WITH_PROXIED_AGENT_FINGERPRINT"]
+admin:
+  socket: /run/coen/edge.sock   # for `coen status` and `coen doctor`
