@@ -21,8 +21,9 @@ func TestStatusCommand(t *testing.T) {
 		SetLevel: func(slog.Level) error { return nil },
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = srv.Serve(ctx, sock) }()
+	served := make(chan struct{})
+	go func() { _ = srv.Serve(ctx, sock); close(served) }()
+	defer func() { cancel(); <-served }() // before the temporary directory goes
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
@@ -61,8 +62,9 @@ func TestStatusCommandHuman(t *testing.T) {
 		SetLevel: func(slog.Level) error { return nil },
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = srv.Serve(ctx, sock) }()
+	served := make(chan struct{})
+	go func() { _ = srv.Serve(ctx, sock); close(served) }()
+	defer func() { cancel(); <-served }() // before the temporary directory goes
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
@@ -100,8 +102,11 @@ func TestStatusCommandShowsAgents(t *testing.T) {
 		SetLevel: func(slog.Level) error { return nil },
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = srv.Serve(ctx, sock) }()
+	served := make(chan struct{})
+	go func() { _ = srv.Serve(ctx, sock); close(served) }()
+	// Let the server remove its socket and lock file before the test's
+	// temporary directory is removed.
+	defer func() { cancel(); <-served }()
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
