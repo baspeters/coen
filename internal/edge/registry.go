@@ -34,6 +34,13 @@ type agentConn struct {
 	stuck int
 }
 
+// isRetired reports whether c has been taken out of the pool to drain.
+func (c *agentConn) isRetired() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.retired
+}
+
 // liveOpensLocked counts opens in flight that may still reach the agent with
 // a request: those not given up on (an abandoned open's stream is closed
 // unused). Callers hold mu.

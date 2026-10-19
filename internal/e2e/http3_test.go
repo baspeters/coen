@@ -44,13 +44,14 @@ type h3Stack struct {
 // echoBackend answers with what it received: method, target, selected
 // headers, and the body's length and hash. /stream sends three flushed parts;
 // /own-alt-svc sets its own Alt-Svc header.
-func echoBackend(t *testing.T) string {
+// It closes a connection idle for idle (0: never).
+func echoBackend(t *testing.T, idle time.Duration) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := &http.Server{IdleTimeout: idle, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/held": // headers at once, the first event after 1.5s
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -115,6 +116,7 @@ func echoBackend(t *testing.T) string {
 		sum := sha256.Sum256(body)
 		w.Header().Set("X-Seen-Connection", r.Header.Get("Connection"))
 		w.Header().Set("X-Seen-Close", fmt.Sprint(r.Close))
+		w.Header().Set("X-Backend-Conn", r.RemoteAddr) // which backend connection carried it
 		fmt.Fprintf(w, "%s %s host=%s te=%v x=%s cookie=%s len=%d sha=%s",
 			r.Method, r.RequestURI, r.Host, r.TransferEncoding, r.Header.Get("X-Test"), r.Header.Get("Cookie"), len(body), hex.EncodeToString(sum[:8]))
 	})}
@@ -128,6 +130,14 @@ const noH3Host = "legacy.test"
 
 func buildH3Stack(t *testing.T) *h3Stack { return buildH3StackWith(t, 0, 0) }
 
+// h3Opts varies an h3Stack: ingress.max_connections, ingress.read_header_timeout,
+// and how long the backend keeps an idle connection open (0: its default).
+type h3Opts struct {
+	maxConns    int
+	readHeader  time.Duration
+	backendIdle time.Duration
+}
+
 // buildH3StackCapped is buildH3Stack with ingress.max_connections set.
 func buildH3StackCapped(t *testing.T, maxConns int) *h3Stack { return buildH3StackWith(t, maxConns, 0) }
 
@@ -135,6 +145,12 @@ func buildH3StackCapped(t *testing.T, maxConns int) *h3Stack { return buildH3Sta
 // ingress.read_header_timeout set.
 func buildH3StackWith(t *testing.T, maxConns int, readHeader time.Duration) *h3Stack {
 	t.Helper()
+	return buildH3StackOpts(t, h3Opts{maxConns: maxConns, readHeader: readHeader})
+}
+
+func buildH3StackOpts(t *testing.T, o h3Opts) *h3Stack {
+	t.Helper()
+	maxConns, readHeader := o.maxConns, o.readHeader
 	ca, err := pki.CreateCA()
 	if err != nil {
 		t.Fatal(err)
@@ -190,7 +206,7 @@ func buildH3StackWith(t *testing.T, maxConns int, readHeader time.Duration) *h3S
 	agentLog, _, _ := obs.NewLogger("error", "text", io.Discard)
 	ag, err := agent.New(&config.AgentConfig{
 		Edge:      config.EdgeRef{Address: tunLn.Addr().String(), CA: caPath, Cert: agentCert, Key: agentKey},
-		Routes:    []config.AgentRoute{{Host: "*", Service: echoBackend(t)}},
+		Routes:    []config.AgentRoute{{Host: "*", Service: echoBackend(t, o.backendIdle)}},
 		Reconnect: config.ReconnectConfig{MinBackoff: config.Duration(10 * time.Millisecond), MaxBackoff: config.Duration(100 * time.Millisecond)},
 		Drain:     config.Duration(time.Second),
 	}, agentLog, st.agent)
@@ -241,8 +257,8 @@ func TestHTTP3RequestReachesTheBackendAsHTTP1(t *testing.T) {
 	if !strings.HasPrefix(body, want) {
 		t.Fatalf("backend saw %q, want prefix %q", body, want)
 	}
-	if resp.Header.Get("X-Seen-Close") != "true" {
-		t.Fatal("the backend must get Connection: close (one request per stream)")
+	if resp.Header.Get("X-Seen-Close") != "false" || resp.Header.Get("X-Seen-Connection") != "" {
+		t.Fatal("the backend must get a keep-alive request: its connection carries the next one")
 	}
 	if resp.Header.Get("Connection") != "" {
 		t.Fatalf("a connection-level header crossed: %v", resp.Header)
@@ -283,10 +299,10 @@ func TestHTTP3RequestReachesTheBackendAsHTTP1(t *testing.T) {
 		t.Fatalf("streamed body: %q", body)
 	}
 
-	// Counted as HTTP/3 streams on the route.
+	// Counted as HTTP/3 requests on the route, over fewer streams.
 	for _, r := range st.edge.Detail().Routes {
-		if r.Pattern == "*" && r.TotalH3 < 4 {
-			t.Fatalf("HTTP/3 streams counted: %d, want at least 4", r.TotalH3)
+		if r.Pattern == "*" && (r.ReqH3 < 4 || r.TotalH3 < 1 || r.TotalH3 >= r.ReqH3) {
+			t.Fatalf("HTTP/3 requests counted: %d over %d streams, want at least 4 over fewer", r.ReqH3, r.TotalH3)
 		}
 	}
 }
@@ -688,5 +704,85 @@ func TestHTTP3RouteOptOut(t *testing.T) {
 	_ = tresp.Body.Close()
 	if tresp.StatusCode != 200 || tresp.Header.Get("Alt-Svc") != "clear" {
 		t.Fatalf("TCP for %s: status %d, Alt-Svc %q, want 200 and clear", noH3Host, tresp.StatusCode, tresp.Header.Get("Alt-Svc"))
+	}
+}
+
+// A connection's requests reuse one backend connection in turn, as a TCP
+// client's do; another HTTP/3 connection never shares it.
+func TestHTTP3ReusesBackendConnectionPerClient(t *testing.T) {
+	st := buildH3Stack(t)
+	conn := func(c *http.Client) string {
+		t.Helper()
+		resp, err := c.Get(st.url("/r"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		readAll(t, resp)
+		return resp.Header.Get("X-Backend-Conn")
+	}
+	a := st.h3Client(t)
+	first := conn(a)
+	for i := 0; i < 5; i++ {
+		if got := conn(a); got != first {
+			t.Fatalf("request %d went over backend connection %s, not %s", i+2, got, first)
+		}
+	}
+	if other := conn(st.h3Client(t)); other == first {
+		t.Fatal("two HTTP/3 connections shared a backend connection")
+	}
+	r := st.edge.Detail().Routes
+	var streams, reqs int64
+	for _, rt := range r {
+		streams += rt.TotalH3
+		reqs += rt.ReqH3
+	}
+	if streams != 2 || reqs != 7 {
+		t.Fatalf("streams %d for %d requests, want 2 for 7", streams, reqs)
+	}
+
+	// Concurrent requests each take a stream of their own; afterwards the
+	// connection keeps them for its next requests.
+	errs := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		go func() {
+			resp, err := a.Get(st.url("/c"))
+			if err == nil {
+				_, err = io.Copy(io.Discard, resp.Body)
+				_ = resp.Body.Close()
+			}
+			errs <- err
+		}()
+	}
+	for i := 0; i < 8; i++ {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A backend that closes idle keep-alive connections: the edge notices the
+// stream end while it is kept, and the next request opens a fresh one.
+func TestHTTP3BackendClosingIdleConnection(t *testing.T) {
+	st := buildH3StackOpts(t, h3Opts{backendIdle: 100 * time.Millisecond})
+	c := st.h3Client(t)
+	get := func() string {
+		t.Helper()
+		resp, err := c.Get(st.url("/i"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != 200 {
+			t.Fatalf("status %d", resp.StatusCode)
+		}
+		readAll(t, resp)
+		return resp.Header.Get("X-Backend-Conn")
+	}
+	first := get()
+	time.Sleep(400 * time.Millisecond) // the backend closes the connection
+	if get() == first {
+		t.Fatal("a backend connection closed while idle was used again")
+	}
+	if f := st.edge.Detail().Routes[0].Failures; f.Get(obs.ReasonStreamError) != 0 || f.Get(obs.ReasonBadResponse) != 0 {
+		t.Fatalf("failures counted: %v", f)
 	}
 }

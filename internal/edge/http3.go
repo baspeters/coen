@@ -34,10 +34,10 @@ import (
 )
 
 // HTTP/3 ingress. The edge terminates HTTP/3 itself and forwards each request
-// over the tunnel as an HTTP/1.1 request on its own stream, exactly like one
-// arriving over TCP, so agents and the tunnel protocol are unchanged. Each
-// request gets Connection: close, so the backend ends the stream after its
-// response. WebSockets over HTTP/3 (extended CONNECT) are bridged to an
+// over the tunnel as an HTTP/1.1 request, exactly like one arriving over TCP,
+// so agents and the tunnel protocol are unchanged. A request's tunnel stream
+// is kept for its connection's next request, as a TCP client's connection is
+// (see h3pool.go). WebSockets over HTTP/3 (extended CONNECT) are bridged to an
 // HTTP/1.1 upgrade (see http3ws.go).
 
 // newHTTP3 returns the HTTP/3 server for the ingress certificate and a QUIC
@@ -48,9 +48,9 @@ import (
 //     (see cappedListener). Each connection carries at most
 //     maxStreamsPerConn requests at once; a client queues the rest itself,
 //     as a browser does with its TCP connections.
-//   - a route's max_connections counts HTTP/3 requests in flight, each one
-//     stream to the backend, as a TCP connection is; requests over it wait
-//     for a slot (see routeSlot), as a browser's queued requests would.
+//   - a route's max_connections counts streams to the backend, kept ones
+//     included, as it counts TCP connections; requests over it wait for a
+//     slot (see routeSlot), as a browser's queued requests would.
 //   - keep-alives hold a connection open through a quiet response (a long
 //     poll, server-sent events). A connection must start its first request
 //     within ingress.read_header_timeout, and one with no request in progress
@@ -82,6 +82,7 @@ func (e *Edge) newHTTP3(cert tls.Certificate, pc net.PacketConn) (*http3.Server,
 		MaxHeaderBytes: maxHeaderBytes,
 		Logger:         e.log.With("component", "http3"),
 		ConnContext: func(ctx context.Context, c *quic.Conn) context.Context {
+			ctx = context.WithValue(ctx, connStreamsKey{}, e.h3pool.newConn(c.Context()))
 			return context.WithValue(ctx, connActivityKey{}, newConnActivity(c, readHeaderDeadline(e.cfg.Ingress.ReadHeaderTimeout.Duration()), idle))
 		},
 	}
@@ -132,8 +133,16 @@ func resetKey(cert tls.Certificate) *quic.StatelessResetKey {
 }
 
 // maxStreamsPerConn is how many requests one HTTP/3 connection may have in
-// flight; a client queues further ones until a stream frees up.
-const maxStreamsPerConn = 32
+// flight; a client queues further ones until a stream frees up. A client
+// gets credit for a new stream only a round trip after one ends, so a limit
+// a page load reaches (many small assets at once) costs every request past
+// it that round trip: this is quic-go's default, as most servers allow.
+const maxStreamsPerConn = 100
+
+// maxKeptPerConn is how many tunnel streams (each a backend connection) an
+// HTTP/3 connection keeps for its next requests (see h3Pool); a burst beyond
+// it opens fresh streams for the rest.
+const maxKeptPerConn = 32
 
 // cappedListener applies the global connection cap to QUIC connections, and
 // once the edge drains, turns new connections away at once (a client then
@@ -220,13 +229,35 @@ func (a *connActivity) begin() (end func()) {
 // Over TCP a browser holds a few connections and queues its other requests;
 // over HTTP/3 it sends them all at once, so they queue here instead, and the
 // backend still sees at most the route's max_connections streams.
+//
+// A stream kept for some connection's next request holds a slot too; a
+// request that finds the route full takes one from such a stream first, and
+// while it waits, finished streams give theirs up instead of being kept.
 func (e *Edge) routeSlot(r *http.Request, rs *routeState, wait time.Duration) bool {
 	if rs.sem.tryAcquire() {
+		return true
+	}
+	rs.slotWaiters.Add(1)
+	defer rs.slotWaiters.Add(-1)
+	if e.slotFromKept(rs) {
 		return true
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), wait)
 	defer cancel()
 	return rs.sem.acquire(ctx)
+}
+
+// slotFromKept takes a slot of rs's connection cap from a stream kept for
+// some HTTP/3 connection's next request, if there is one: a request that
+// needs the slot now comes first. Callers count themselves in
+// rs.slotWaiters first, so that a stream finishing meanwhile is not kept.
+func (e *Edge) slotFromKept(rs *routeState) bool {
+	for e.h3pool.evictRoute(rs) {
+		if rs.sem.tryAcquire() {
+			return true
+		}
+	}
+	return false
 }
 
 // peekWait bounds the look at a request body of unknown length (see
@@ -314,6 +345,65 @@ func (e *Edge) serveHTTP3(w http.ResponseWriter, r *http.Request) {
 		}
 		r.Body, r.ContentLength = pb, pb.length()
 	}
+	head := lines // a WebSocket upgrade has no body
+	if ws {
+		ts := e.openH3Stream(r, rs, connID, host, head, log, fail)
+		if ts == nil {
+			return
+		}
+		defer ts.close() // an upgraded stream is never kept
+		rs.stats.HTTP3Request()
+		// A client that resets its request ends the stream at once, and with
+		// it the backend's connection, as closing a TCP connection does.
+		defer context.AfterFunc(r.Context(), func() { abort(ts.s) })()
+		sb := rs.stats.Bytes()
+		sb.AddIn(int64(len(head))) // sent with the preamble (v2) or after it
+		tunnelSide := &countingConn{Conn: proxy.NewIdleConn(ts.s, e.cfg.Ingress.IdleTimeout.Duration()), in: sb.AddIn, out: sb.AddOut}
+		e.serveHTTP3WebSocket(w, r, tunnelSide, int64(len(head)), wsKey, log, fail, rs.stats.Failure)
+		return
+	}
+	head = framed(lines, r, trailers)
+	// A small body is held in memory. An idempotent request with no body, or
+	// one held, can be sent again; only such a request takes a kept stream,
+	// which may turn out to have closed just as the request went out (see
+	// h3Exchange). Others go on a fresh stream, which is then kept like any
+	// other.
+	held, inMemory, err := e.holdBody(w, r, trailers)
+	if err != nil {
+		// The body broke off, came short, or stalled for idle_timeout.
+		log.Debug("ingress.body_error", "error", err.Error())
+		panic(http.ErrAbortHandler)
+	}
+	cs := connStreamsOf(r)
+	reuse := inMemory && idempotent(r) && cs != nil
+	for sent := false; ; sent = true {
+		var ts *tunnelStream
+		if reuse {
+			ts = e.h3pool.take(cs, host, rs)
+		}
+		reused := ts != nil
+		if !reused {
+			if ts = e.openH3Stream(r, rs, connID, host, head, log, fail); ts == nil {
+				return
+			}
+		}
+		if !sent {
+			rs.stats.HTTP3Request() // once, however many streams it takes
+		}
+		if inMemory {
+			r.Body = io.NopCloser(bytes.NewReader(held))
+		}
+		if !e.h3Exchange(w, r, cs, ts, head, reused, inMemory, trailers, log, fail) {
+			return
+		}
+		reuse = false // sent again on a fresh stream
+	}
+}
+
+// openH3Stream opens a tunnel stream for HTTP/3 request r to host on rs,
+// whose HTTP/1.1 head is head, and sends the head. Otherwise it has answered
+// the client, or given up on it, and returns nil.
+func (e *Edge) openH3Stream(r *http.Request, rs *routeState, connID, host string, head []byte, log *slog.Logger, fail func(int, string, string)) *tunnelStream {
 	if !e.routeSlot(r, rs, readHeaderDeadline(e.cfg.Ingress.ReadHeaderTimeout.Duration())) {
 		if r.Context().Err() != nil {
 			panic(http.ErrAbortHandler) // the client gave up waiting
@@ -321,64 +411,98 @@ func (e *Edge) serveHTTP3(w http.ResponseWriter, r *http.Request) {
 		rs.stats.Failure(obs.ReasonRouteMaxConnections)
 		log.Warn("ingress.rejected", "reason", "route_max_connections")
 		fail(503, "Service Unavailable", "Too many connections")
-		return
-	}
-	defer rs.sem.release()
-
-	head := lines // a WebSocket upgrade has no body
-	if !ws {
-		head = framed(lines, r, trailers)
+		return nil
 	}
 	stream, chosen, refused := e.dispatch(rs, connID, r.RemoteAddr, host, head, log)
 	if refused != nil {
+		rs.sem.release()
 		fail(refused.code, refused.reason, refused.detail)
-		return
+		return nil
 	}
-	defer func() { _ = stream.Close() }()
-	// A client that resets its request ends the stream at once, and with it
-	// the backend's connection, as closing a TCP connection does.
-	defer context.AfterFunc(r.Context(), func() { abort(stream) })()
 	if !chosen.v2 { // a version 1 agent gets the head after the preamble
 		if _, err := stream.Write(head); err != nil {
+			_ = stream.Close()
 			chosen.stat.StreamClosed() // release the reservation: no stream after all
+			rs.sem.release()
 			rs.stats.Failure(obs.ReasonStreamError)
 			log.Warn("stream.send_error", "agent_fp", chosen.fp, "error", err.Error())
 			fail(streamFailed.code, streamFailed.reason, streamFailed.detail)
-			return
+			return nil
 		}
 	}
 	chosen.stat.Commit()
-	defer chosen.stat.StreamClosed()
 	e.state.StreamOpenedHTTP3(rs.stats)
-	defer e.state.StreamClosed(rs.stats)
-	sb := rs.stats.Bytes()
-	log.Debug("stream.open")
-	sb.AddIn(int64(len(head))) // sent: with the preamble (v2) or just now
-	tunnelSide := &countingConn{Conn: proxy.NewIdleConn(stream, e.cfg.Ingress.IdleTimeout.Duration()), in: sb.AddIn, out: sb.AddOut}
-	if ws {
-		e.serveHTTP3WebSocket(w, r, tunnelSide, int64(len(head)), wsKey, log, fail, rs.stats.Failure)
-		return
-	}
+	log.Debug("stream.open", "agent_fp", chosen.fp)
+	return &tunnelStream{e: e, s: stream, agent: chosen, rs: rs, host: host}
+}
 
-	// The body goes up while the response comes down: a backend may answer
-	// before it has read all of it.
-	upload := make(chan struct{})
-	var clientBodyFailed atomic.Bool
-	body := &readErrs{r: r.Body}
-	go func() {
-		defer close(upload)
-		if err := sendBody(tunnelSide, body, r, trailers); err != nil {
-			// The stream cannot carry the rest of the body: end it, or the
-			// backend would wait for it forever. Whether that is the
-			// client's doing (its body broke off, or came short of its
-			// Content-Length) or the tunnel's decides how the request ends
-			// (see below).
-			log.Debug("stream.body_error", "error", err.Error())
-			short := r.ContentLength > 0 && body.n < r.ContentLength && errors.Is(err, io.EOF)
-			clientBodyFailed.Store(body.failed || short)
-			abort(stream)
+// h3Exchange sends HTTP/3 request r on ts (its head, unless ts was just
+// opened with it, and its body) and relays the response. After a clean
+// exchange ts is kept in cs's pool for the connection's next request;
+// otherwise it is closed.
+//
+// A kept stream (reused) can have closed just as the request went out: the
+// service may end an idle connection at any time. When nothing came back,
+// h3Exchange reports retry without answering, and the caller sends the
+// request again on a fresh stream, as a browser resends a request on a
+// keep-alive connection that closed under it.
+func (e *Edge) h3Exchange(w http.ResponseWriter, r *http.Request, cs *connStreams, ts *tunnelStream, head []byte, reused, inMemory bool, trailers []string, log *slog.Logger, fail func(int, string, string)) (retry bool) {
+	rs, fp := ts.rs, ts.agent.fp
+	sb := rs.stats.Bytes()
+	tunnelSide := &countingConn{Conn: proxy.NewIdleConn(ts.s, e.cfg.Ingress.IdleTimeout.Duration()), in: sb.AddIn, out: sb.AddOut}
+	if reused {
+		log.Debug("stream.reuse", "agent_fp", fp)
+		if _, err := tunnelSide.Write(head); err != nil {
+			log.Debug("stream.stale", "agent_fp", fp, "error", err.Error())
+			ts.close()
+			return true // nothing reached the service
 		}
-	}()
+	} else {
+		sb.AddIn(int64(len(head))) // sent with the preamble (v2) or after it
+	}
+	// A client that resets its request ends the stream at once, and with it
+	// the backend's connection, as closing a TCP connection does.
+	stopAbort := context.AfterFunc(r.Context(), func() { abort(ts.s) })
+
+	upload := make(chan struct{})
+	var clientBodyFailed, uploadFailed atomic.Bool
+	body := &readErrs{r: r.Body}
+	if inMemory {
+		// A body held in memory (if any) is smaller than the stream's
+		// window, so it goes at once, before the response is read: the
+		// stream is at a message boundary when the response ends.
+		err := sendBody(tunnelSide, body, r, trailers)
+		close(upload)
+		if err != nil {
+			if reused {
+				log.Debug("stream.stale", "agent_fp", fp, "error", err.Error())
+				stopAbort()
+				ts.close()
+				return true // the kept stream had closed: nothing came back
+			}
+			log.Debug("stream.body_error", "error", err.Error())
+			uploadFailed.Store(true)
+			abort(ts.s) // the read below fails: the tunnel stream broke
+		}
+	} else {
+		// The body goes up while the response comes down: a backend may
+		// answer before it has read all of it.
+		go func() {
+			defer close(upload)
+			if err := sendBody(tunnelSide, body, r, trailers); err != nil {
+				// The stream cannot carry the rest of the body: end it, or
+				// the backend would wait for it forever. Whether that is the
+				// client's doing (its body broke off, or came short of its
+				// Content-Length) or the tunnel's decides how the request
+				// ends (see below).
+				log.Debug("stream.body_error", "error", err.Error())
+				short := r.ContentLength > 0 && body.n < r.ContentLength && errors.Is(err, io.EOF)
+				clientBodyFailed.Store(body.failed || short)
+				uploadFailed.Store(true)
+				abort(ts.s)
+			}
+		}()
+	}
 	uploadDone := func() bool {
 		select {
 		case <-upload:
@@ -387,14 +511,19 @@ func (e *Edge) serveHTTP3(w http.ResponseWriter, r *http.Request) {
 			return false
 		}
 	}
+	kept := false
 	defer func() {
-		abort(stream)
+		stopAbort()
+		if !kept {
+			ts.close() // which also ends an upload still writing
+		}
 		_ = r.Body.Close()
 		<-upload // the body must not be read once the handler returns
 	}()
 
 	limited := newHeadLimit(tunnelSide)
-	resp, err := readFinalResponse(bufio.NewReaderSize(limited, 16<<10), r.Method, func(code int, h http.Header) {
+	br := bufio.NewReaderSize(limited, 16<<10)
+	resp, err := readFinalResponse(br, r.Method, func(code int, h http.Header) {
 		// 100 Continue (the client may be waiting for it to send its body),
 		// 103 Early Hints and the like go to the client as they come. Each
 		// head gets the whole limit.
@@ -408,6 +537,11 @@ func (e *Edge) serveHTTP3(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case err == nil:
 		limited.done() // the body may be any length
+	case reused && tunnelSide.outTotal == 0 && isTunnelGone(err) && r.Context().Err() == nil:
+		// The kept stream had closed: nothing came back, so the service
+		// cannot have answered. Send the request again on a fresh stream.
+		log.Debug("stream.stale", "agent_fp", fp, "error", err.Error())
+		return true
 	case r.Context().Err() != nil || clientBodyFailed.Load():
 		// The client gave up, or its body broke off (closing the stream is
 		// what ended the read): not a failure of the service.
@@ -417,27 +551,26 @@ func (e *Edge) serveHTTP3(w http.ResponseWriter, r *http.Request) {
 		// Nothing moved for idle_timeout while the edge was waiting on the
 		// client's body: the client stalled, not the service. (Had the
 		// service stopped reading it, the edge would be waiting to write.)
-		log.Debug("stream.body_stalled", "agent_fp", chosen.fp)
+		log.Debug("stream.body_stalled", "agent_fp", fp)
 		panic(http.ErrAbortHandler)
 	case isTimeout(err):
 		// No response within ingress.idle_timeout. Over TCP the connection
 		// would just be closed; here the client gets a clear answer.
 		rs.stats.Failure(obs.ReasonResponseTimeout)
-		log.Warn("stream.response_timeout", "agent_fp", chosen.fp, "idle_timeout", e.cfg.Ingress.IdleTimeout.Duration().String())
+		log.Warn("stream.response_timeout", "agent_fp", fp, "idle_timeout", e.cfg.Ingress.IdleTimeout.Duration().String())
 		fail(504, "Gateway Timeout", "No response from the service in time")
-		return
+		return false
 	case isTunnelGone(err):
 		rs.stats.Failure(obs.ReasonStreamError) // the tunnel stream broke
-		log.Warn("stream.broken", "agent_fp", chosen.fp, "error", err.Error())
+		log.Warn("stream.broken", "agent_fp", fp, "error", err.Error())
 		fail(502, "Bad Gateway", "Tunnel stream failed")
-		return
+		return false
 	default:
 		rs.stats.Failure(obs.ReasonBadResponse)
-		log.Warn("stream.bad_response", "agent_fp", chosen.fp, "error", err.Error())
+		log.Warn("stream.bad_response", "agent_fp", fp, "error", err.Error())
 		fail(502, "Bad Gateway", "Invalid response from the service")
-		return
+		return false
 	}
-	defer func() { _ = resp.Body.Close() }()
 	copyResponseHeader(w.Header(), resp.Header)
 	if _, ok := resp.Header["Content-Type"]; !ok {
 		// The HTTP/3 writer would guess one; the service sent none, and a
@@ -454,7 +587,8 @@ func (e *Edge) serveHTTP3(w http.ResponseWriter, r *http.Request) {
 	// sent events, a progress feed); a sized one flows as the writer fills.
 	if err := copyResponse(w, resp.Body, resp.ContentLength < 0, e.cfg.Ingress.IdleTimeout.Duration()); err != nil {
 		// The status is out: all that is left is to cut the response short,
-		// so the client does not take it for complete.
+		// so the client does not take it for complete. (The stream is
+		// closed, not drained: the body is not read on.)
 		log.Debug("stream.response_cut", "error", err.Error())
 		panic(http.ErrAbortHandler)
 	}
@@ -463,7 +597,71 @@ func (e *Edge) serveHTTP3(w http.ResponseWriter, r *http.Request) {
 			w.Header()[http.TrailerPrefix+k] = vs
 		}
 	}
+	// The exchange is over and the stream at a message boundary: keep it,
+	// unless the service is closing its connection (or its response could
+	// only end that way), the body did not all go up, the service sent more
+	// than its response, or the client has already reset the request.
+	if cs != nil && !resp.Close && uploadDone() && !uploadFailed.Load() && br.Buffered() == 0 && stopAbort() {
+		kept = true
+		e.h3pool.put(cs, ts, e.h3Idle())
+		log.Debug("stream.kept", "agent_fp", fp)
+		return false
+	}
 	log.Debug("stream.closed")
+	return false
+}
+
+// maxHeldBody is the largest request body held in memory: sent at once,
+// so the stream is at a message boundary when the response ends, and
+// available to send again (see h3Exchange).
+const maxHeldBody = 64 << 10
+
+// holdBody reads r's body into memory when it is small, of a known length,
+// not announced with Expect: 100-continue and not followed by trailers, and
+// reports whether it did; a request without a body always counts as held.
+func (e *Edge) holdBody(w http.ResponseWriter, r *http.Request, trailers []string) ([]byte, bool, error) {
+	switch {
+	case len(trailers) > 0 || expectsContinue(r) || r.ContentLength < 0 || r.ContentLength > maxHeldBody:
+		return nil, false, nil
+	case r.ContentLength == 0:
+		return nil, true, nil
+	}
+	// A client that stops sending must not hold the request: the read is
+	// bounded as a connection without a request is (see h3Idle), and
+	// without a bound the body is streamed, as one too large to hold is. (A
+	// deadline may cut a frame short; the request then ends anyway.)
+	rc := http.NewResponseController(w)
+	if rc.SetReadDeadline(time.Now().Add(e.h3Idle())) != nil {
+		return nil, false, nil
+	}
+	defer func() { _ = rc.SetReadDeadline(time.Time{}) }()
+	b := make([]byte, r.ContentLength)
+	if _, err := io.ReadFull(r.Body, b); err != nil {
+		return nil, false, err
+	}
+	return b, true, nil
+}
+
+// idempotent reports a request that may be sent twice: an idempotent method
+// (RFC 9110, section 9.2.2), or one the client marked with an idempotency
+// key, as Go's HTTP client does. The service can have acted on a request
+// and then closed its connection without answering; repeating that is
+// harmless only for these.
+func idempotent(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace, http.MethodPut, http.MethodDelete:
+		return true
+	}
+	return r.Header.Get("Idempotency-Key") != "" || r.Header.Get("X-Idempotency-Key") != ""
+}
+
+// h3Idle is how long an HTTP/3 connection may go without a request, and so
+// how long a stream is kept for its next one.
+func (e *Edge) h3Idle() time.Duration {
+	if idle := e.cfg.Ingress.IdleTimeout.Duration(); idle > 0 {
+		return idle
+	}
+	return defaultHTTP3Idle
 }
 
 // hopHeaders are the HTTP/1.1 connection-level headers, which do not cross
@@ -527,7 +725,7 @@ func framed(lines []byte, r *http.Request, trailers []string) []byte {
 	case methodHasBody(r.Method):
 		b.WriteString("Content-Length: 0\r\n")
 	}
-	b.WriteString("Connection: close\r\n\r\n")
+	b.WriteString("\r\n") // keep-alive: the stream may carry the connection's next request
 	return b.Bytes()
 }
 
@@ -893,6 +1091,7 @@ func (e *Edge) serveHTTP3Until(ctx context.Context, srv *http3.Server, tr *quic.
 	// times out. Established ones finish their requests.
 	ln.draining.Store(true)
 	go func() { _, _ = ln.Accept(context.Background()) }() // returns when ln closes
+	e.h3pool.closeAll()                                    // requests in flight finish; their streams are not kept
 	sctx, cancel := context.WithTimeout(context.Background(), e.cfg.Drain.Duration())
 	defer cancel()
 	if err := srv.Shutdown(sctx); err != nil {

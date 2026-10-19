@@ -35,7 +35,7 @@ func TestHTTP1HeadFraming(t *testing.T) {
 		want []string
 		not  []string
 	}{
-		{mk("GET", 0, nil), []string{"GET /p?q=1 HTTP/1.1\r\nHost: app.example.com\r\n", "Connection: close\r\n\r\n"}, []string{"Content-Length", "Transfer-Encoding"}},
+		{mk("GET", 0, nil), []string{"GET /p?q=1 HTTP/1.1\r\nHost: app.example.com\r\n"}, []string{"Content-Length", "Transfer-Encoding", "Connection"}},
 		{mk("POST", 0, nil), []string{"Content-Length: 0\r\n"}, []string{"Transfer-Encoding"}},
 		{mk("PUT", 12, nil), []string{"Content-Length: 12\r\n"}, nil},
 		{mk("PATCH", -1, nil), []string{"Transfer-Encoding: chunked\r\n"}, []string{"Content-Length"}},

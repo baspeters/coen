@@ -95,6 +95,7 @@ type RouteStats struct {
 	active   atomic.Int64
 	total    atomic.Int64 // all streams
 	totalH3  atomic.Int64 // edge: of which for HTTP/3 requests
+	reqH3    atomic.Int64 // edge: HTTP/3 requests sent to the service, over those streams
 	bytes    [byteShards]byteShard
 	next     atomic.Uint32 // round-robin shard assignment for new streams
 	failures reasonCounts
@@ -109,6 +110,15 @@ func (r *RouteStats) opened(http3 bool) {
 	if http3 {
 		r.totalH3.Add(1) // after total, so a snapshot never sees more HTTP/3 streams than streams
 	}
+}
+
+// HTTP3Request counts an HTTP/3 request sent to the service. A stream for
+// HTTP/3 requests carries one or more of a connection's requests in turn.
+func (r *RouteStats) HTTP3Request() {
+	if r == nil {
+		return
+	}
+	r.reqH3.Add(1)
 }
 
 func (r *RouteStats) closed() {
@@ -179,6 +189,7 @@ type RouteSnapshot struct {
 	Active   int64
 	Total    int64 // all streams
 	TotalH3  int64 // of which for HTTP/3 requests (edge)
+	ReqH3    int64 // HTTP/3 requests sent over them (edge)
 	BytesIn  int64
 	BytesOut int64
 	Failures ReasonCounts
@@ -250,6 +261,7 @@ func (s *State) routeSnapshots() []RouteSnapshot {
 			Active:   r.active.Load(),
 			Total:    all,
 			TotalH3:  h3,
+			ReqH3:    r.reqH3.Load(),
 			BytesIn:  in,
 			BytesOut: outB,
 			Failures: r.failures.snapshot(),

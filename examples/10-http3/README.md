@@ -73,14 +73,16 @@ curl --http3-only -sI https://intranet.example.com/   # fails in the TLS handsha
 ```
 
 The edge's metrics count both: `coen_streams_total` has one stream per TCP
-connection and one per HTTP/3 request, and `coen_streams_http3_total` counts the
-HTTP/3 ones.
+connection, and over HTTP/3 one per connection to the service, and
+`coen_streams_http3_total` counts the HTTP/3 ones. `coen_http3_requests_total`
+counts the HTTP/3 requests those streams carried.
 
 ## Notes
 
 - WebSockets work over both: one opened over HTTP/3 reaches the service as an
   ordinary HTTP/1.1 upgrade.
-- Each HTTP/3 request reaches the service on its own connection (`Connection: close`).
-- 0-RTT is off, so requests are never replayed.
+- HTTP/3 requests reuse connections to the service, as TCP clients do: a
+  connection carries one HTTP/3 connection's requests in turn, never another's.
+- 0-RTT is off, so a captured request cannot be replayed by anyone else.
 - Behind nginx (proxied mode), let nginx serve HTTP/3 instead; see the
   [HTTP/3 section](../../README.md#http3-for-clients) of the main README.

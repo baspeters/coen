@@ -39,6 +39,10 @@ type routeState struct {
 	sem          *semaphore
 	stats        *obs.RouteStats
 	noHTTP3      bool // routes[].http3: false: kept off HTTP/3 (see altSvcFor, refuseNoHTTP3)
+	// slotWaiters counts requests (HTTP/3, or a TCP connection) after a
+	// slot of sem: while any are, a stream that has finished a request gives
+	// its slot up rather than being kept for the next one (see h3Pool.put).
+	slotWaiters atomic.Int32
 }
 
 // pick chooses a session among cands, skipping those already tried for this
@@ -135,6 +139,7 @@ type Edge struct {
 	pickMu  sync.Mutex // shared by all routes' least_conn picks
 	drainWG sync.WaitGroup
 	altSvc  atomic.Value // string: Alt-Svc value added to TCP responses ("" for none)
+	h3pool  *h3Pool      // tunnel streams kept between a connection's HTTP/3 requests
 	pubCert struct {
 		once sync.Once
 		cert tls.Certificate
@@ -162,7 +167,7 @@ func New(cfg *config.EdgeConfig, log *slog.Logger, state *obs.State) (*Edge, err
 	if cert.Leaf != nil {
 		state.SetSelfFingerprint(pki.Fingerprint(cert.Leaf))
 	}
-	e := &Edge{cfg: cfg, log: log, state: state, tunTLS: tunnel.ServerTLSConfig(pool, cert), allowed: cfg.AllowedFingerprints(), reg: newRegistry(), sem: newSemaphore(cfg.Ingress.MaxConnections)}
+	e := &Edge{cfg: cfg, log: log, state: state, tunTLS: tunnel.ServerTLSConfig(pool, cert), allowed: cfg.AllowedFingerprints(), reg: newRegistry(), sem: newSemaphore(cfg.Ingress.MaxConnections), h3pool: newH3Pool()}
 	e.reg.shared = cfg.SharedFingerprints()
 	e.altSvc.Store("") // set once HTTP/3 is up (see ServeWithHTTP3)
 	state.ExpectAgents(e.allowed)
@@ -750,6 +755,7 @@ func (e *Edge) retire(c *agentConn) {
 		return
 	}
 	e.reg.take(c.fp, c.sess)
+	e.h3pool.closeAgent(c) // kept HTTP/3 streams would hold up the drain
 	c.stat.SetDraining()
 	e.log.Info("agent.draining", "peer_fp", c.fp)
 }
@@ -842,7 +848,7 @@ func (e *Edge) handleIngress(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
-	if !rs.sem.tryAcquire() {
+	if !e.tcpRouteSlot(rs) {
 		rs.stats.Failure(obs.ReasonRouteMaxConnections)
 		log.Warn("ingress.rejected", "reason", "route_max_connections")
 		errpage.Write(conn, 503, "Service Unavailable", "Too many connections", connID)
@@ -889,6 +895,18 @@ func (e *Edge) handleIngress(conn net.Conn) {
 	// Both copies have ended, so the totals are settled: tunnel bytes, as
 	// the metrics count them.
 	log.Debug("stream.closed", "bytes_in", counted.inTotal+preSent, "bytes_out", counted.outTotal)
+}
+
+// tcpRouteSlot takes a slot of rs's connection cap for a TCP connection,
+// from a stream an HTTP/3 connection keeps for its next request if need be
+// (see slotFromKept). A TCP connection does not wait for one.
+func (e *Edge) tcpRouteSlot(rs *routeState) bool {
+	if rs.sem.tryAcquire() {
+		return true
+	}
+	rs.slotWaiters.Add(1)
+	defer rs.slotWaiters.Add(-1)
+	return e.slotFromKept(rs)
 }
 
 // altSvcFor returns the Alt-Svc value for TCP responses on rs. With HTTP/3

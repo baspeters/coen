@@ -384,19 +384,31 @@ ingress:
   port can be bound, and on Linux whether the kernel's UDP buffers are as large as QUIC asks
   for (raise `net.core.rmem_max` and `net.core.wmem_max` to at least 7340032 for full speed).
 - **Agents are unchanged.** The edge terminates HTTP/3 and sends each request through the
-  tunnel as an HTTP/1.1 request on its own stream, with `Connection: close`, so every HTTP/3
-  request opens its own connection to the local service. A request body of unknown length
+  tunnel as an HTTP/1.1 request, as one arriving over TCP. A request body of unknown length
   goes as `Transfer-Encoding: chunked`.
+- **Connections to the service are reused,** as over TCP: once a response has ended, its
+  tunnel stream (one connection to the service) carries the next request of the same HTTP/3
+  connection, so a request does not wait for a new stream and a new connection to the
+  service. Up to 32 per HTTP/3 connection are kept, while it is open; one is never shared
+  between HTTP/3 connections, so a service that ties state to its connection only ever sees
+  one client's requests on it. A response with `Connection: close` (or without a length)
+  ends its stream. If the service closes a kept connection just as a request goes out and
+  nothing comes back, the edge sends the request again on a fresh one. Only requests that may
+  be sent twice take a kept connection: `GET`, `HEAD`, `OPTIONS`, `TRACE`, `PUT`, `DELETE`, or
+  one with an `Idempotency-Key` header, without a body or with one of up to 64 KiB. Others,
+  such as a `POST`, go on a fresh connection (which is then kept), so they are never sent
+  twice. A route's kept connections also give way to TCP clients when the route is full.
 - **How clients find it.** Browsers first connect over TCP; the edge adds
   `Alt-Svc: h3=":443"; ma=86400` to the first response on each connection, unless the service
   sets its own `Alt-Svc`. `alt_svc: off` leaves responses alone (except on hosts kept off
   HTTP/3, below), and any other value is sent as given. A DNS `HTTPS` record lets a browser use HTTP/3 from the first request:
   `app.example.com. 300 IN HTTPS 1 . alpn="h3"`.
 - **Limits.** `ingress.max_connections` counts each QUIC connection as one, like a TCP
-  connection, and a connection carries at most 32 requests at once (the client queues the
-  rest). A route's `max_connections` counts HTTP/3 requests in flight, each one connection to
-  the service; requests over it wait up to `ingress.read_header_timeout` for a slot, so the
-  service never sees more than that many either way.
+  connection, and a connection carries at most 100 requests at once (the client queues the
+  rest). A route's `max_connections` counts connections to the service, kept ones included;
+  a request that finds it full takes the slot of a kept one, or waits up to
+  `ingress.read_header_timeout` for one, so the service never sees more than that many
+  either way.
 - **Timeouts.** A new connection must start a request within `ingress.read_header_timeout`,
   and one with no request in progress closes after `ingress.idle_timeout` (`30s` when unset).
   Keep-alives hold a connection through a quiet response such as server-sent events. A request
@@ -405,11 +417,12 @@ ingress:
 - **WebSockets** work over both. A browser may open one over HTTP/3 (RFC 9220, extended
   `CONNECT`); the edge turns it into the usual HTTP/1.1 `Upgrade` towards the agent, so the
   service sees an ordinary WebSocket handshake. Other `CONNECT` requests get `501`. 0-RTT is
-  off, so a request can never be replayed.
+  off, so a captured request cannot be replayed by anyone else.
 - **Keeping a host off HTTP/3.** Windows sign-in (NTLM, Negotiate/Kerberos) authenticates the
   TCP connection, which HTTP/3 (like HTTP/2) cannot carry; over TCP it works, since each client
-  connection reaches the service as one connection. `http3: false` on a route keeps its hosts
-  on TCP:
+  connection reaches the service as one connection. Over HTTP/3 it may seem to work, when the
+  sign-in's requests happen to reuse one connection to the service, and then fail when other
+  requests run alongside it. `http3: false` on a route keeps its hosts on TCP:
   - The first TCP response on each connection gets `Alt-Svc: clear` in place of any `Alt-Svc`
     the service sets, whatever `alt_svc` says, so a browser forgets HTTP/3 for the host.
     Later responses on the connection, and a head the edge cannot read (bare LF line endings,
@@ -876,8 +889,9 @@ starts at `0`, so `rate()` works from the first scrape.
 | `coen_build_info` | gauge | both | `role`, `version` | Always `1`; carries the build version. |
 | `coen_process_start_time_seconds` | gauge | both | | Daemon start time, Unix seconds. |
 | `coen_streams_active` | gauge | both | `route` | Streams open right now. |
-| `coen_streams_total` | counter | both | `route` | Streams opened: one per TCP connection, and one per HTTP/3 request. |
+| `coen_streams_total` | counter | both | `route` | Streams opened: one per TCP connection, and over HTTP/3 one per connection to the service, which carries one or more of an HTTP/3 connection's requests in turn. |
 | `coen_streams_http3_total` | counter | edge | `route` | Of those, the streams for HTTP/3 requests. |
+| `coen_http3_requests_total` | counter | edge | `route` | HTTP/3 requests sent to the service, over the streams in `coen_streams_http3_total`; the difference is how often a connection to the service was reused. |
 | `coen_stream_bytes_total` | counter | both | `route`, `direction` | Bytes carried by streams, counted as they flow, so long-lived WebSockets show steady throughput. `in` is client to backend, `out` is backend to client. |
 | `coen_streams_peak` | gauge | both | | Highest concurrent stream count since start. |
 | `coen_draining` | gauge | both | | `1` once shutdown has started and in-flight streams are draining, else `0`. |

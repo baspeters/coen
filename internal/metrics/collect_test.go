@@ -37,6 +37,8 @@ func TestCollectEdge(t *testing.T) {
 	s.HandshakeDuplicate()
 	s.StreamOpened(app)
 	s.StreamOpenedHTTP3(app)
+	app.HTTP3Request()
+	app.HTTP3Request()
 	app.Bytes().AddIn(100)
 	app.Bytes().AddOut(2000)
 	s.StreamClosed(app)
@@ -52,6 +54,8 @@ func TestCollectEdge(t *testing.T) {
 		`coen_streams_active{route="*.example.com"} 0`,
 		`coen_streams_total{route="app.example.com"} 2`,
 		`coen_streams_http3_total{route="app.example.com"} 1`,
+		`coen_http3_requests_total{route="app.example.com"} 2`,
+		`coen_http3_requests_total{route="*.example.com"} 0`,
 		`coen_stream_bytes_total{direction="in",route="app.example.com"} 100`,
 		`coen_stream_bytes_total{direction="out",route="app.example.com"} 2000`,
 		`coen_streams_peak 2`,
