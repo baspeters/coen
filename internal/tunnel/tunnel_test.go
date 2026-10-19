@@ -4,11 +4,18 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/hashicorp/yamux"
 )
 
 func TestPreambleRoundTrip(t *testing.T) {
@@ -196,5 +203,43 @@ func TestPreambleRoundTripHost(t *testing.T) {
 	}
 	if out.Host != in.Host {
 		t.Errorf("Host = %q, want %q", out.Host, in.Host)
+	}
+}
+
+func TestIsTeardown(t *testing.T) {
+	for _, err := range []error{io.EOF, net.ErrClosed, yamux.ErrStreamClosed, yamux.ErrSessionShutdown, yamux.ErrConnectionReset, fmt.Errorf("read: %w", io.EOF)} {
+		if !IsTeardown(err) {
+			t.Errorf("IsTeardown(%v) = false, want true", err)
+		}
+	}
+	for _, err := range []error{io.ErrUnexpectedEOF, syscall.ECONNRESET, errors.New("preamble too large: 9999 bytes"), os.ErrDeadlineExceeded, &json.SyntaxError{}} {
+		if IsTeardown(err) {
+			t.Errorf("IsTeardown(%v) = true, want false", err)
+		}
+	}
+}
+
+func TestReadPreambleLengthPrefixOnlyIsTruncated(t *testing.T) {
+	var hdr [2]byte
+	binary.BigEndian.PutUint16(hdr[:], 10)
+	if _, err := ReadPreamble(bytes.NewReader(hdr[:])); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("got %v, want io.ErrUnexpectedEOF", err)
+	}
+	if _, err := ReadPreamble(bytes.NewReader(nil)); !errors.Is(err, io.EOF) {
+		t.Fatalf("an empty stream must stay io.EOF (teardown), got %v", err)
+	}
+}
+
+type countingWriter struct{ writes int }
+
+func (c *countingWriter) Write(b []byte) (int, error) { c.writes++; return len(b), nil }
+
+func TestWritePreambleIsOneWrite(t *testing.T) {
+	var w countingWriter
+	if err := WritePreamble(&w, Preamble{ConnID: "c", Host: "h"}); err != nil {
+		t.Fatal(err)
+	}
+	if w.writes != 1 {
+		t.Fatalf("writes = %d, want 1", w.writes)
 	}
 }

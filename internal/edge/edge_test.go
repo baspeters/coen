@@ -387,6 +387,10 @@ func TestEdgeProbeDoesNotDisplaceLiveAgent(t *testing.T) {
 	if agentsConnected(e) != 1 {
 		t.Fatalf("agents connected = %d, want 1", agentsConnected(e))
 	}
+	// The refused probe is counted as a duplicate, not as ok or fail.
+	if snap := e.state.Snapshot(); snap.HandshakeDup != 1 || snap.HandshakeOK != 1 {
+		t.Fatalf("duplicate = %d ok = %d, want 1 and 1", snap.HandshakeDup, snap.HandshakeOK)
+	}
 }
 
 func TestEdgeClosesAgentSessionOnShutdown(t *testing.T) {

@@ -110,6 +110,14 @@ func startStack(t *testing.T, ingressTLS *tls.Config) (ingressAddr string, edgeB
 // tunnel to register. It returns the ingress address and the log buffers.
 func buildStack(t *testing.T, logLevel string, ingressTLS *tls.Config, edgeHosts []string, agentRoutes []config.AgentRoute) (ingressAddr string, edgeBuf, agentBuf *syncBuf) {
 	t.Helper()
+	ingressAddr, edgeBuf, agentBuf, _, _ = buildStackStates(t, logLevel, ingressTLS, edgeHosts, agentRoutes)
+	return ingressAddr, edgeBuf, agentBuf
+}
+
+// buildStackStates is buildStack that also returns the edge and agent State, so
+// a test can inspect counters (for example through the metrics collector).
+func buildStackStates(t *testing.T, logLevel string, ingressTLS *tls.Config, edgeHosts []string, agentRoutes []config.AgentRoute) (ingressAddr string, edgeBuf, agentBuf *syncBuf, edgeState, agentState *obs.State) {
+	t.Helper()
 	ca, err := pki.CreateCA()
 	if err != nil {
 		t.Fatal(err)
@@ -130,7 +138,7 @@ func buildStack(t *testing.T, logLevel string, ingressTLS *tls.Config, edgeHosts
 	edgeBuf, agentBuf = &syncBuf{}, &syncBuf{}
 	edgeLog, _, _ := obs.NewLogger(logLevel, "text", edgeBuf)
 	agentLog, _, _ := obs.NewLogger(logLevel, "text", agentBuf)
-	var edgeState, agentState obs.State
+	edgeState, agentState = obs.NewState("edge"), obs.NewState("agent")
 
 	edgeRoutes := make([]config.EdgeRoute, len(edgeHosts))
 	for i, h := range edgeHosts {
@@ -141,7 +149,7 @@ func buildStack(t *testing.T, logLevel string, ingressTLS *tls.Config, edgeHosts
 		Tunnel:  config.TunnelServerConfig{CA: caPath, Cert: edgeCertPath, Key: edgeKeyPath},
 		Routes:  edgeRoutes,
 	}
-	e, err := edge.New(edgeCfg, edgeLog, &edgeState)
+	e, err := edge.New(edgeCfg, edgeLog, edgeState)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +171,7 @@ func buildStack(t *testing.T, logLevel string, ingressTLS *tls.Config, edgeHosts
 		Routes:    agentRoutes,
 		Reconnect: config.ReconnectConfig{MinBackoff: config.Duration(10 * time.Millisecond), MaxBackoff: config.Duration(100 * time.Millisecond)},
 	}
-	a, err := agent.New(agentCfg, agentLog, &agentState)
+	a, err := agent.New(agentCfg, agentLog, agentState)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +184,7 @@ func buildStack(t *testing.T, logLevel string, ingressTLS *tls.Config, edgeHosts
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	return ingressLn.Addr().String(), edgeBuf, agentBuf
+	return ingressLn.Addr().String(), edgeBuf, agentBuf, edgeState, agentState
 }
 
 func TestEndToEndHTTP(t *testing.T) {

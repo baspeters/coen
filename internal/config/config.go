@@ -34,6 +34,12 @@ type AdminConfig struct {
 	Socket string `yaml:"socket"`
 }
 
+// MetricsConfig enables the Prometheus /metrics endpoint. It is off when Listen
+// is empty.
+type MetricsConfig struct {
+	Listen string `yaml:"listen"`
+}
+
 type TLSFiles struct {
 	Cert string `yaml:"cert"`
 	Key  string `yaml:"key"`
@@ -76,6 +82,7 @@ type EdgeConfig struct {
 	Drain   Duration           `yaml:"drain_timeout"`
 	Log     LogConfig          `yaml:"log"`
 	Admin   AdminConfig        `yaml:"admin"`
+	Metrics MetricsConfig      `yaml:"metrics"`
 	// Version is the build version, set programmatically (not from YAML). The
 	// edge stamps it into each stream preamble for agent-side skew detection.
 	Version string `yaml:"-"`
@@ -111,6 +118,7 @@ type AgentConfig struct {
 	Drain     Duration        `yaml:"drain_timeout"`
 	Log       LogConfig       `yaml:"log"`
 	Admin     AdminConfig     `yaml:"admin"`
+	Metrics   MetricsConfig   `yaml:"metrics"`
 	// Version is the build version, set programmatically (not from YAML), used
 	// to warn on an edge/agent version skew.
 	Version string `yaml:"-"`

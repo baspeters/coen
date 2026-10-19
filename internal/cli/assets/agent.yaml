@@ -15,3 +15,5 @@ log:
   # format:                 # unset autodetects: journal under systemd, text in a terminal. Override: text|json|journal
 admin:
   socket: /run/coen/agent.sock
+# metrics:                  # optional Prometheus endpoint, serves GET /metrics; unset = off
+#   listen: 127.0.0.1:9465  # keep it on loopback or a private interface; it has no auth

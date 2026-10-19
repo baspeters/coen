@@ -23,6 +23,7 @@ backends.
 | [05-wildcard-and-default](05-wildcard-and-default/) | standalone | `*.example.com` wildcard plus `*` catch-all |
 | [06-hardening-and-limits](06-hardening-and-limits/) | standalone | connection caps, idle deadline, per-route caps, draining |
 | [07-proxied-multi-host-tls](07-proxied-multi-host-tls/) | proxied | nginx SNI and per-host certs in front of a multi-agent edge |
+| [08-prometheus-metrics](08-prometheus-metrics/) | standalone | the opt-in `/metrics` endpoint on edge and agent, with a scrape config |
 
 ## Route matching
 

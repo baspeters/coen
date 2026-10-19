@@ -82,8 +82,10 @@ func TestNewIDUnique(t *testing.T) {
 func TestStateSnapshot(t *testing.T) {
 	var s State
 	s.SetConnected("SHA256:abc")
-	s.StreamOpened()
-	s.StreamClosed(10, 20)
+	s.StreamOpened(nil)
+	s.Route("t").Bytes().AddIn(10)
+	s.Route("t").Bytes().AddOut(20)
+	s.StreamClosed(nil)
 	s.Reconnect()
 	snap := s.Snapshot()
 	if !snap.TunnelConnected || snap.TotalStreams != 1 || snap.ActiveStreams != 0 {
@@ -117,9 +119,11 @@ func TestStateHandshakeErrorAndDisconnect(t *testing.T) {
 	s.Reconnect()
 
 	s.SetConnected("SHA256:xyz")
-	s.StreamOpened()
-	s.StreamOpened()
-	s.StreamClosed(3, 4) // one of two streams closes; active count should decrement, not zero
+	s.StreamOpened(nil)
+	s.StreamOpened(nil)
+	s.Route("t").Bytes().AddIn(3)
+	s.Route("t").Bytes().AddOut(4)
+	s.StreamClosed(nil) // one of two streams closes; active count should decrement, not zero
 
 	snap := s.Snapshot()
 	if snap.HandshakeFail != 2 {
@@ -152,13 +156,15 @@ func TestStateHandshakeErrorAndDisconnect(t *testing.T) {
 
 	// The high-water mark holds once the peak passes and does not rise on a
 	// re-open that stays below it.
-	s.StreamClosed(0, 0) // active 1 -> 0
-	s.StreamOpened()     // active 0 -> 1; below the peak of 2
+	s.Route("t").Bytes().AddIn(0)
+	s.Route("t").Bytes().AddOut(0)
+	s.StreamClosed(nil) // active 1 -> 0
+	s.StreamOpened(nil) // active 0 -> 1; below the peak of 2
 	if m := s.Snapshot().MaxStreams; m != 2 {
 		t.Fatalf("MaxStreams = %d, want it to hold at the peak of 2", m)
 	}
-	s.StreamOpened()
-	s.StreamOpened() // active climbs to 3; a new peak
+	s.StreamOpened(nil)
+	s.StreamOpened(nil) // active climbs to 3; a new peak
 	if m := s.Snapshot().MaxStreams; m != 3 {
 		t.Fatalf("MaxStreams = %d, want 3 after a new peak", m)
 	}

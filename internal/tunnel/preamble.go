@@ -28,12 +28,12 @@ func WritePreamble(w io.Writer, p Preamble) error {
 	if len(b) > maxPreamble {
 		return fmt.Errorf("preamble too large: %d bytes", len(b))
 	}
-	var hdr [2]byte
-	binary.BigEndian.PutUint16(hdr[:], uint16(len(b)))
-	if _, err := w.Write(hdr[:]); err != nil {
-		return err
-	}
-	_, err = w.Write(b)
+	// One write for prefix and body, so a stream cut mid-way never leaves a
+	// lone length prefix that the reader would take for a truncated header.
+	frame := make([]byte, 2+len(b))
+	binary.BigEndian.PutUint16(frame[:2], uint16(len(b)))
+	copy(frame[2:], b)
+	_, err = w.Write(frame)
 	return err
 }
 
@@ -48,6 +48,12 @@ func ReadPreamble(r io.Reader) (Preamble, error) {
 	}
 	buf := make([]byte, n)
 	if _, err := io.ReadFull(r, buf); err != nil {
+		if err == io.EOF {
+			// The length prefix arrived but no body byte did (ReadFull into a
+			// non-empty buffer): the header is truncated, not a stream that
+			// closed before sending anything.
+			err = io.ErrUnexpectedEOF
+		}
 		return Preamble{}, err
 	}
 	var p Preamble

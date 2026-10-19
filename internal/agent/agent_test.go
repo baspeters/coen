@@ -642,8 +642,8 @@ func TestHandleStreamRoutesToBackendByHost(t *testing.T) {
 	a := &Agent{
 		log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		state: &obs.State{},
-		routes: route.Build([]route.Entry[string]{
-			{Pattern: "app.example.com", Value: ln.Addr().String()},
+		routes: route.Build([]route.Entry[agentRoute]{
+			{Pattern: "app.example.com", Value: agentRoute{service: ln.Addr().String()}},
 		}),
 	}
 
@@ -677,7 +677,7 @@ func TestHandleStreamNoRouteReturns502(t *testing.T) {
 	a := &Agent{
 		log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		state:  &obs.State{},
-		routes: route.Build([]route.Entry[string]{{Pattern: "app.example.com", Value: "127.0.0.1:1"}}),
+		routes: route.Build([]route.Entry[agentRoute]{{Pattern: "app.example.com", Value: agentRoute{service: "127.0.0.1:1"}}}),
 	}
 	client, streamSide := net.Pipe()
 	go a.handleStream(context.Background(), streamSide)
@@ -704,7 +704,7 @@ func TestHandleStreamBackendUnreachableReturns502(t *testing.T) {
 	a := &Agent{
 		log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		state:  &obs.State{},
-		routes: route.Build([]route.Entry[string]{{Pattern: "app.example.com", Value: deadAddr}}),
+		routes: route.Build([]route.Entry[agentRoute]{{Pattern: "app.example.com", Value: agentRoute{service: deadAddr}}}),
 	}
 	client, streamSide := net.Pipe()
 	go a.handleStream(context.Background(), streamSide)

@@ -3,6 +3,9 @@
 *.out
 coverage.txt
 coverage.html
+.DS_Store
+*.swp
+.*.swp
 
 # Personal working docs (spec and plan), kept out of Git
 docs/superpowers/

@@ -2,13 +2,17 @@ package doctor
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"os"
+	"syscall"
 	"time"
 
 	"github.com/baspeters/coen/internal/admin"
 	"github.com/baspeters/coen/internal/config"
+	"github.com/baspeters/coen/internal/metrics"
+	"github.com/baspeters/coen/internal/netx"
 	"github.com/baspeters/coen/internal/pki"
 	"github.com/baspeters/coen/internal/tunnel"
 )
@@ -33,20 +37,62 @@ func checkFile(name, path string) Result {
 }
 
 func checkBind(name, addr, adminSocket string) Result {
+	return bindCheck(name, addr, func() (string, bool) {
+		// If a coen daemon is answering on the admin socket, the port is almost
+		// certainly held by that running daemon (the normal case when debugging
+		// a live host), not a genuine conflict.
+		if adminSocket == "" {
+			return "", false
+		}
+		_, err := admin.Status(adminSocket)
+		return "in use by the running coen daemon", err == nil
+	}, "another process may hold the port, or you lack permission to bind it (:443 needs CAP_NET_BIND_SERVICE)")
+}
+
+// checkMetricsBind checks the metrics address can be bound. When it cannot, it
+// is still fine if a coen daemon of the same role is already serving metrics
+// there. Unlike the tunnel and ingress checks this asks the port itself rather
+// than the admin socket, so a daemon running without metrics, or the other
+// role's daemon on the same port, does not mask a real conflict.
+func checkMetricsBind(addr, role string) Result {
+	return bindCheck("bind: metrics", addr, func() (string, bool) {
+		return "in use by the running coen " + role + "'s metrics endpoint", metrics.ServesRole(addr, role)
+	}, "")
+}
+
+// bindCheck passes when addr can be bound, or when it cannot but ours reports
+// that the running coen daemon holds it (with a note for the result detail).
+func bindCheck(name, addr string, ours func() (note string, held bool), hint string) Result {
 	ln, err := net.Listen("tcp", addr)
 	if err == nil {
 		_ = ln.Close()
 		return ok(name, addr)
 	}
-	// Could not bind. If a coen daemon is answering on the admin socket, the
-	// port is almost certainly held by that running daemon (the normal case
-	// when debugging a live host), not a genuine conflict.
-	if adminSocket != "" {
-		if _, sErr := admin.Status(adminSocket); sErr == nil {
-			return ok(name, addr+" (in use by the running coen daemon)")
+	// An address this host does not have cannot be held by a running daemon,
+	// so skip the ownership probe for it.
+	if !netx.IsAddrNotAvail(err) {
+		if note, held := ours(); held {
+			return ok(name, addr+" ("+note+")")
 		}
 	}
-	return fail(name, err.Error(), "another process may hold the port, or you lack permission to bind it (:443 needs CAP_NET_BIND_SERVICE)")
+	return fail(name, err.Error(), bindHint(err, hint))
+}
+
+// bindHint explains a bind failure by its cause, falling back to fallback (or a
+// port-conflict hint when fallback is empty).
+func bindHint(err error, fallback string) string {
+	switch {
+	case errors.Is(err, syscall.EACCES):
+		return "permission denied: ports below 1024 need root or CAP_NET_BIND_SERVICE"
+	case netx.IsAddrNotAvail(err):
+		return "the address is not assigned to this host; use one of its own addresses or a wildcard"
+	case netx.IsAddrInUse(err) && fallback != "":
+		return fallback
+	case netx.IsAddrInUse(err):
+		return "another process holds the port; pick a free one"
+	default:
+		return "check the address: the host must be resolvable and the port valid"
+	}
 }
 
 // agentLiveTunnel reports whether the local agent (via its admin socket) already
@@ -75,6 +121,10 @@ func CheckAgent(cfg *config.AgentConfig) []Result {
 		} else {
 			out = append(out, ok("config: edge_fingerprint", "well-formed"))
 		}
+	}
+
+	if cfg.Metrics.Listen != "" {
+		out = append(out, checkMetricsBind(cfg.Metrics.Listen, "agent"))
 	}
 
 	caPEM, err := os.ReadFile(cfg.Edge.CA)
@@ -194,5 +244,8 @@ func CheckEdge(cfg *config.EdgeConfig) []Result {
 
 	out = append(out, checkBind("bind: tunnel", cfg.Tunnel.Listen, cfg.Admin.Socket))
 	out = append(out, checkBind("bind: ingress", cfg.Ingress.Listen, cfg.Admin.Socket))
+	if cfg.Metrics.Listen != "" {
+		out = append(out, checkMetricsBind(cfg.Metrics.Listen, "edge"))
+	}
 	return out
 }

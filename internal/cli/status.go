@@ -71,21 +71,19 @@ func resolveStatusSocket(role, cfgPath string) (string, error) {
 
 func adminSocketFromConfig(role, path string) (string, error) {
 	var socket string
+	// Only admin.socket is needed to reach a running daemon, so the file is
+	// decoded (strictly) without validating the rest.
+	var err error
 	switch role {
 	case "edge":
-		c, err := config.LoadEdge(path)
-		if err != nil {
-			return "", fmt.Errorf("load %s: %w", path, err)
-		}
-		socket = c.Admin.Socket
+		socket, err = config.EdgeAdminSocket(path)
 	case "agent":
-		c, err := config.LoadAgent(path)
-		if err != nil {
-			return "", fmt.Errorf("load %s: %w", path, err)
-		}
-		socket = c.Admin.Socket
+		socket, err = config.AgentAdminSocket(path)
 	default:
 		return "", fmt.Errorf("role must be 'edge' or 'agent', got %q", role)
+	}
+	if err != nil {
+		return "", fmt.Errorf("load %s: %w", path, err)
 	}
 	if socket == "" {
 		return "", fmt.Errorf("%s has no admin.socket configured; pass --socket", path)
