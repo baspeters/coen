@@ -3,8 +3,10 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -86,10 +88,17 @@ func (c *EdgeConfig) Validate() error {
 	if err := c.Ingress.validateHTTP3(); err != nil {
 		return err
 	}
-	for name, v := range map[string]string{"tunnel.listen": c.Tunnel.Listen, "tunnel.ca": c.Tunnel.CA, "tunnel.cert": c.Tunnel.Cert, "tunnel.key": c.Tunnel.Key} {
+	required := map[string]string{"tunnel.ca": c.Tunnel.CA, "tunnel.cert": c.Tunnel.Cert, "tunnel.key": c.Tunnel.Key}
+	if !c.Tunnel.ShareIngress {
+		required["tunnel.listen"] = c.Tunnel.Listen // agents need some way in
+	}
+	for name, v := range required {
 		if v == "" {
 			return fmt.Errorf("%s is required", name)
 		}
+	}
+	if c.Tunnel.ShareIngress && c.Ingress.Mode != "standalone" {
+		return fmt.Errorf("tunnel.share_ingress needs ingress.mode standalone: behind a reverse proxy the edge never sees the agents' TLS handshake")
 	}
 	if err := c.Metrics.validate(); err != nil {
 		return err
@@ -212,6 +221,9 @@ func (c *AgentConfig) Validate() error {
 		if v == "" {
 			return fmt.Errorf("%s is required", name)
 		}
+	}
+	if err := validateProxy(c.Edge.Proxy); err != nil {
+		return err
 	}
 	if err := c.Metrics.validate(); err != nil {
 		return err
@@ -486,4 +498,32 @@ func localIPs() func(net.IP) bool {
 		}
 		return false
 	}
+}
+
+// validateProxy checks edge.proxy: empty, or an http:// or https:// URL
+// naming a host and nothing past it but optional credentials.
+func validateProxy(p string) error {
+	if p == "" {
+		return nil
+	}
+	bad := func(why string) error {
+		return fmt.Errorf("edge.proxy must be http://[user:password@]host[:port] or https://..., %s", why)
+	}
+	u, err := url.Parse(p)
+	switch {
+	case err != nil:
+		return bad("and does not parse")
+	case u.Scheme != "http" && u.Scheme != "https":
+		return bad(fmt.Sprintf("not scheme %q", u.Scheme))
+	case u.Hostname() == "":
+		return bad("and names no host")
+	case u.Path != "" && u.Path != "/", u.RawQuery != "", u.Fragment != "":
+		return bad("with nothing after the host")
+	}
+	if port := u.Port(); port != "" {
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+			return bad(fmt.Sprintf("and port %q is not 1 to 65535", port))
+		}
+	}
+	return nil
 }

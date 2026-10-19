@@ -27,6 +27,7 @@ backends.
 | [08-prometheus-metrics](08-prometheus-metrics/) | standalone | the opt-in `/metrics` endpoint on edge and agent, with a scrape config |
 | [09-load-balancing](09-load-balancing/) | standalone | several agents per host, by separate or shared certificates, with failover |
 | [10-http3](10-http3/) | standalone | HTTP/3 (QUIC) for clients, advertised with `Alt-Svc`, and a host kept off it with `http3: false` |
+| [11-agents-on-443](11-agents-on-443/) | standalone | agents connecting to the ingress port, directly or through an HTTP proxy |
 
 ## Route matching
 

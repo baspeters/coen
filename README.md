@@ -488,6 +488,80 @@ ingress:
   the vhost. nginx forwards to the edge over plain HTTP as before, so the edge needs no
   `http3` settings.
 
+### Agents behind restrictive networks
+
+An agent dials the edge's tunnel port, `2636` by default. Where the agent's network only lets
+connections out to port 443, or only through an HTTP proxy, two settings get it through. Both
+keep the tunnel's end-to-end mTLS exactly as it is: nothing between the agent and the edge
+sees inside it.
+
+**The tunnel on the ingress port (standalone mode).** With `tunnel.share_ingress: true` the
+edge also takes agents on `ingress.listen`, usually `:443`:
+
+```yaml
+# edge.yaml
+ingress:
+  mode: standalone
+  listen: ":443"
+  tls: { cert: /etc/coen/certs/public.crt, key: /etc/coen/certs/public.key }
+tunnel:
+  share_ingress: true       # agents may connect to :443 too
+  # listen: ":2636"         # optional now; keep it for agents older than v0.4.0
+  ca:   /etc/coen/pki/ca.crt
+  cert: /etc/coen/pki/edge.crt
+  key:  /etc/coen/pki/edge.key
+```
+
+```yaml
+# agent.yaml
+edge:
+  address: edge.example.com:443
+```
+
+- **How it tells them apart.** An agent's TLS handshake offers the protocol `coen/2` (ALPN);
+  a browser's never does. The edge reads that offer before it chooses a certificate: an agent
+  gets the tunnel's mTLS handshake (the edge's tunnel certificate, a client certificate
+  required), and everyone else the public certificate, as before. Nothing else changes: the
+  agent is accepted, counted and logged exactly as on the tunnel port.
+- **Agents from v0.4.0 on.** Older agents offer no ALPN, so on a shared port they get the
+  public certificate and fail to verify it. Keep `tunnel.listen` for them until they are
+  upgraded; both ways in work at once.
+- **The edge's tunnel certificate** must name the host in the agent's `edge.address`, as
+  always (`coen cert edge --host edge.example.com`); the public and tunnel certificates can
+  name the same host.
+- **Limits.** An agent's connection counts against `ingress.max_connections` only during its
+  handshake, and is never answered with the `503` page: at the cap, the edge still completes
+  an agent's handshake and takes it. A client that offers `coen/2` without a valid client
+  certificate is a rejected tunnel handshake (`coen_tunnel_handshakes_total{result="rejected"}`),
+  not a bad ingress request.
+- **Proxied mode** cannot share: nginx terminates TLS, so the edge never sees the agent's
+  handshake. Keep `tunnel.listen` reachable there (the config rejects `share_ingress` in
+  proxied mode).
+
+**Through an HTTP proxy.** With `edge.proxy` the agent reaches the edge through an HTTP proxy,
+with `CONNECT`:
+
+```yaml
+# agent.yaml
+edge:
+  address: edge.example.com:443        # most proxies allow CONNECT only to port 443
+  proxy: http://user:password@proxy.corp.example:3128   # or https://, or no credentials
+```
+
+- The agent asks the proxy for a tunnel to `edge.address` and runs its mTLS through it; the
+  proxy resolves the edge's name. Basic credentials come from the URL (percent-encode special
+  characters); logs show them as `xxxxx`. Keep `agent.yaml` readable only by root and `coen`,
+  as the packages install it.
+- `https://` connects to the proxy over TLS, verified against the system's trusted CAs.
+- Many proxies (squid's default `SSL_ports`) allow `CONNECT` only to port 443, so pair a proxy
+  with an edge that shares its ingress, as above.
+- `coen doctor` on the agent checks through the proxy too: it resolves the proxy's name
+  instead of the edge's, and a refused `CONNECT` shows the proxy's answer (for example `407`
+  for missing credentials, `403` for a port it does not allow).
+- A proxy that intercepts TLS (decrypts and re-encrypts it) cannot carry the tunnel: the edge
+  sees the proxy's certificate instead of the agent's. Such networks need a transport over
+  WebSockets, which is on the [roadmap](#roadmap).
+
 ## Examples
 
 The [`examples/`](examples/) directory has an example configuration for every setup variant and
@@ -505,6 +579,7 @@ config option, each with its own README:
 | [Prometheus metrics](examples/08-prometheus-metrics/) | the opt-in `/metrics` endpoint on edge and agent, with a scrape config and alerts |
 | [load balancing](examples/09-load-balancing/) | several agents per host, by separate or shared certificates, with failover and handoff |
 | [HTTP/3](examples/10-http3/) | HTTP/3 (QUIC) for clients, advertised with `Alt-Svc`, and a host kept off it with `http3: false` |
+| [agents on port 443](examples/11-agents-on-443/) | agents connecting to the ingress port, directly or through an HTTP proxy |
 
 ## Command overview
 
@@ -569,7 +644,10 @@ timeouts, fingerprints) are read at startup and take effect only when the proces
   `agent_fingerprint` and `agent_fingerprints`, no empty or repeated entry, a known
   `balance`), that `allow_shared_cert` is set alike on every route that names a fingerprint,
   the `ingress.http3` settings (only when `enabled`: standalone mode, a valid UDP address, a
-  single-line `alt_svc`), and that `http3: false` is not used in `proxied` mode. On both roles
+  single-line `alt_svc`), that `http3: false` is not used in `proxied` mode, and that
+  `tunnel.share_ingress` is only used in `standalone` mode (with it, `tunnel.listen` is
+  optional). On the agent, `edge.proxy` must be an `http://` or `https://` URL naming a host,
+  with nothing after it but optional credentials. On both roles
   `metrics.listen` must be a valid `host:port` that does not overlap the daemon's own
   listeners (edge) or a route's `service` (agent); every agent route needs a `service`.
   Fingerprints are compared exactly; their format is only checked by `coen doctor`, so a
@@ -630,6 +708,7 @@ ingress:
     # alt_svc: auto         # auto, off, or a literal Alt-Svc value
 tunnel:
   listen: ":2636"           # mTLS server the agent dials
+  # share_ingress: false    # true: agents may also connect to ingress.listen (standalone)
   ca:   /etc/coen/pki/ca.crt
   cert: /etc/coen/pki/edge.crt
   key:  /etc/coen/pki/edge.key
@@ -663,7 +742,8 @@ metrics:                    # optional; unset disables the endpoint
 | `ingress.http3.enabled` | bool | `false` | Serve HTTP/3 (QUIC over UDP) as well; `standalone` mode only. See [HTTP/3 for clients](#http3-for-clients). The other `ingress.http3` keys are only checked when this is `true`. |
 | `ingress.http3.listen` | string | `ingress.listen` | UDP address for HTTP/3, `host:port`. |
 | `ingress.http3.alt_svc` | string | `auto` | `Alt-Svc` added to the first final response on each TCP connection, unless the service sent its own: `auto` sends `h3=":<UDP port>"; ma=86400`, `off` adds nothing, and any other value (a single header line) is sent as given. While HTTP/3 is enabled, routes with `http3: false` always get `Alt-Svc: clear` in place of the service's. |
-| `tunnel.listen` | string | required | Address of the mTLS tunnel server the agents dial, e.g. `:2636`. |
+| `tunnel.listen` | string | required, unless `share_ingress` | Address of the mTLS tunnel server the agents dial, e.g. `:2636`. |
+| `tunnel.share_ingress` | bool | `false` | Also accept agents on `ingress.listen`, told apart from browsers by the TLS protocol they offer; `standalone` mode only. Agents from v0.4.0 on. See [Agents behind restrictive networks](#agents-behind-restrictive-networks). |
 | `tunnel.ca` | path | required | CA bundle that an agent's client certificate must chain to. |
 | `tunnel.cert`, `tunnel.key` | path | required | The edge's server certificate and key for the tunnel. |
 | `routes` | list | at least one | Host ownership; see [Host routing](#host-routing-and-matching). May be split into `edge.d/`. |
@@ -689,6 +769,7 @@ edge:
   cert: /etc/coen/pki/agent.crt
   key:  /etc/coen/pki/agent.key
   # edge_fingerprint: "SHA256:..."               # optional certificate pinning
+  # proxy: http://user:password@proxy:3128       # optional: reach the edge through an HTTP proxy
 routes:                     # host -> local backend service
   - host: app.example.com
     service: 127.0.0.1:8080
@@ -711,6 +792,7 @@ metrics:                    # optional; unset disables the endpoint
 | `edge.ca` | path | required | CA bundle the edge's server certificate must chain to. |
 | `edge.cert`, `edge.key` | path | required | The agent's client certificate and key. |
 | `edge.edge_fingerprint` | string | (unset) | Optional pin, in the same `SHA256:<base64>` form as a route's `agent_fingerprint`. When set, the agent refuses an edge whose server-certificate fingerprint differs. |
+| `edge.proxy` | string | (unset) | An HTTP proxy to reach the edge through, with `CONNECT`: `http://[user:password@]host[:port]` or `https://...` (ports default to 80 and 443). See [Agents behind restrictive networks](#agents-behind-restrictive-networks). |
 | `routes` | list | at least one | Host to local backend; see [Host routing](#host-routing-and-matching). May be split into `agent.d/`. |
 | `routes[].host` | string | required | Same pattern grammar as the edge: exact, `*.suffix`, or `*`. |
 | `routes[].service` | string | required | Local backend address (`host:port`) the agent dials for this host. |
@@ -904,7 +986,10 @@ connection caps, and lazy backend dial so a connection reaches an agent only aft
 complete request head. On shutdown, in-flight streams are drained up to `drain_timeout`. In a
 proxied deployment nginx also fronts the ingress and adds its own slow-client protection.
 Treat internet-exposed use as beta, and where you can, firewall the tunnel port to known
-sources.
+sources. With `tunnel.share_ingress` the tunnel answers on the public port too, so a scanner
+that offers the tunnel's protocol there learns it is a Coen edge (it is asked for a client
+certificate it does not have); it gains nothing more than on the tunnel port, and such
+attempts count as rejected tunnel handshakes.
 
 ## Observability and diagnostics
 
@@ -957,12 +1042,14 @@ should equal that agent's `self_fp`.
 `coen doctor` runs role-aware checks and exits non-zero if any fails, so it fits into deploy
 scripts. On the edge: the PKI files are present and parse, the edge keypair loads, the public
 certificate loads (standalone), each route's fingerprints are well formed, and the tunnel and
-ingress ports can be bound. With `ingress.http3.enabled` it also checks that the UDP port can
+ingress ports can be bound (with `tunnel.share_ingress` it reports that agents may also use the
+ingress port, and checks the tunnel port only when `tunnel.listen` is set). With `ingress.http3.enabled` it also checks that the UDP port can
 be bound and, on Linux, whether `net.core.rmem_max` and `net.core.wmem_max` reach the 7340032
 bytes QUIC asks for (advisory: a smaller value still passes). With `metrics.listen` set it
 checks that the metrics port can be bound. On the agent: the PKI files and keypair, the
-`edge_fingerprint` format, the metrics bind, DNS for the edge, TCP reachability, an mTLS
-handshake with the pin, the edge certificate's validity window against the local clock, and
+`edge_fingerprint` format, the metrics bind, DNS for the edge (for the proxy instead, with
+`edge.proxy`), TCP reachability (through the proxy, with `CONNECT`), an mTLS handshake with
+the pin, the edge certificate's validity window against the local clock, and
 that each route's service accepts a connection. A port held by the role's own running daemon
 counts as a pass. `--json` prints the results as JSON. With a daemon running it auto-detects the role, and
 when the agent's tunnel is already up it verifies edge reachability and mTLS from that live
@@ -1066,11 +1153,12 @@ Delivered:
 - [x] Prometheus `/metrics` endpoint, per route and per agent
 - [x] Load balancing across several agents per host, with failover
 - [x] HTTP/3 (QUIC) for clients in standalone mode
+- [x] Agents on port 443: the tunnel on the standalone ingress port, and through HTTP proxies
 
 Still planned (the architecture leaves room for them):
 
 - [ ] ACME and Let's Encrypt automatic certificates for standalone mode
-- [ ] Tunnelling over `:443` (nginx `stream` with `ssl_preread`, or a WebSocket transport)
+- [ ] A WebSocket transport for the tunnel, through TLS-intercepting proxies and CDNs
 - [ ] Certificate rotation and revocation without an edge restart
 
 ## Contributing

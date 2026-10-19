@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -174,13 +175,25 @@ func CheckAgent(cfg *config.AgentConfig) []Result {
 	if err != nil {
 		return append(out, fail("dns: edge address", err.Error(), "edge.address must be host:port"))
 	}
-	if _, err := net.LookupHost(host); err != nil {
+	via := cfg.Edge.ProxyURL()
+	if via != nil {
+		// The proxy resolves the edge's name; this host only needs the proxy's.
+		if _, err := net.LookupHost(via.Hostname()); err != nil {
+			out = append(out, fail("dns: resolve proxy", err.Error(), "check the host in edge.proxy"))
+		} else {
+			out = append(out, ok("dns: resolve proxy", via.Hostname()+" (the proxy resolves "+host+")"))
+		}
+	} else if _, err := net.LookupHost(host); err != nil {
 		out = append(out, fail("dns: resolve edge", err.Error(), "check the hostname or use an IP"))
 	} else {
 		out = append(out, ok("dns: resolve edge", host))
 	}
 
 	addr := net.JoinHostPort(host, port)
+	reach := addr
+	if via != nil {
+		reach = addr + " through proxy " + via.Redacted()
+	}
 
 	// If the local agent is already connected, verify reachability and mTLS from
 	// its live tunnel rather than probing the edge. An active probe would perturb
@@ -193,16 +206,24 @@ func CheckAgent(cfg *config.AgentConfig) []Result {
 			out = append(out, fail("mtls: pin", fmt.Sprintf("got %s want %s", edgeFP, pin), "update edge_fingerprint or the edge certificate"))
 		}
 	} else {
-		c, err := net.DialTimeout("tcp", addr, 5*time.Second)
+		c, err := netx.Dial(context.Background(), addr, via, 5*time.Second)
 		if err != nil {
-			return append(out, fail("net: tcp reach", err.Error(), fmt.Sprintf("open port %s on the edge / firewall", port)))
+			hint := fmt.Sprintf("open port %s on the edge / firewall", port)
+			switch {
+			case errors.Is(err, netx.ErrProxyAuth):
+				hint = "set the proxy's user:password in edge.proxy (percent-encode special characters)"
+			case via != nil:
+				hint = "check edge.proxy, and that the proxy allows CONNECT to port " + port + " (many allow only 443)"
+			}
+			return append(out, fail("net: tcp reach", err.Error(), hint))
 		}
-		_ = c.Close()
-		out = append(out, ok("net: tcp reach", addr))
+		out = append(out, ok("net: tcp reach", reach))
 
 		clientTLS := tunnel.ClientTLSConfig(pool, clientCert, host)
-		tconn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr, clientTLS)
-		if err != nil {
+		tconn := tls.Client(c, clientTLS)
+		_ = tconn.SetDeadline(time.Now().Add(5 * time.Second))
+		if err := tconn.Handshake(); err != nil {
+			_ = c.Close()
 			out = append(out, fail("mtls: handshake", err.Error(), "verify the CA matches on both hosts and the edge cert covers "+host))
 		} else {
 			leaf := tconn.ConnectionState().PeerCertificates[0]
@@ -280,7 +301,12 @@ func CheckEdge(cfg *config.EdgeConfig) []Result {
 		}
 	}
 
-	out = append(out, checkBind("bind: tunnel", cfg.Tunnel.Listen, cfg.Admin.Socket))
+	if cfg.Tunnel.Listen != "" {
+		out = append(out, checkBind("bind: tunnel", cfg.Tunnel.Listen, cfg.Admin.Socket))
+	}
+	if cfg.Tunnel.ShareIngress {
+		out = append(out, ok("tunnel: shared ingress", "agents may also connect to "+cfg.Ingress.Listen+" (agents from v0.4.0 on; older ones need tunnel.listen)"))
+	}
 	out = append(out, checkBind("bind: ingress", cfg.Ingress.Listen, cfg.Admin.Socket))
 	if cfg.Ingress.HTTP3.Enabled {
 		out = append(out, checkUDPBind("bind: http3 (udp)", cfg.Ingress.HTTP3Listen(), cfg.Admin.Socket))

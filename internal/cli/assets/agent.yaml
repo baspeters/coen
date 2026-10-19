@@ -4,6 +4,7 @@ edge:
   cert: /etc/coen/pki/agent.crt
   key:  /etc/coen/pki/agent.key
   # edge_fingerprint: "SHA256:..."   # optional: pin the edge's certificate
+  # proxy: http://user:password@proxy:3128   # optional: reach the edge through an HTTP proxy
 routes:
   - host: app.example.com
     service: 127.0.0.1:8080

@@ -1,0 +1,12 @@
+# An agent in a network that reaches the internet only through an HTTP proxy.
+edge:
+  address: edge.example.com:443        # most proxies allow CONNECT only to port 443
+  proxy: http://coen:REPLACE_WITH_PASSWORD@proxy.corp.example:3128
+  ca:   /etc/coen/pki/ca.crt
+  cert: /etc/coen/pki/agent-proxy.crt
+  key:  /etc/coen/pki/agent-proxy.key
+routes:
+  - host: app.example.com
+    service: 127.0.0.1:8080
+admin:
+  socket: /run/coen/agent.sock   # for `coen status` and `coen doctor`

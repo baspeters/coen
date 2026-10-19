@@ -1,0 +1,11 @@
+# An agent in a network that lets connections out only to port 443.
+edge:
+  address: edge.example.com:443
+  ca:   /etc/coen/pki/ca.crt
+  cert: /etc/coen/pki/agent-direct.crt
+  key:  /etc/coen/pki/agent-direct.key
+routes:
+  - host: app.example.com
+    service: 127.0.0.1:8080
+admin:
+  socket: /run/coen/agent.sock   # for `coen status` and `coen doctor`

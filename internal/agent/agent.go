@@ -111,9 +111,13 @@ func (a *Agent) Run(ctx context.Context) error {
 }
 
 func (a *Agent) connectOnce(ctx context.Context) (stable bool, err error) {
-	a.log.Info("edge.dial", "address", a.cfg.Edge.Address)
-	d := &net.Dialer{Timeout: 10 * time.Second}
-	raw, err := d.DialContext(ctx, "tcp", a.cfg.Edge.Address)
+	via := a.cfg.Edge.ProxyURL()
+	if via != nil {
+		a.log.Info("edge.dial", "address", a.cfg.Edge.Address, "proxy", via.Redacted())
+	} else {
+		a.log.Info("edge.dial", "address", a.cfg.Edge.Address)
+	}
+	raw, err := netx.Dial(ctx, a.cfg.Edge.Address, via, 10*time.Second)
 	if err != nil {
 		a.state.HandshakeFail()
 		return false, fmt.Errorf("dial edge: %w", err)

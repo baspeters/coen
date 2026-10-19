@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -163,6 +164,12 @@ type TunnelServerConfig struct {
 	CA     string `yaml:"ca"`
 	Cert   string `yaml:"cert"`
 	Key    string `yaml:"key"`
+	// ShareIngress also accepts agent tunnels on ingress.listen (standalone
+	// mode): a TLS client that offers the tunnel's ALPN protocol gets the
+	// tunnel's mTLS handshake instead of the public certificate, so agents
+	// can reach the edge where only port 443 is open. Listen is then
+	// optional.
+	ShareIngress bool `yaml:"share_ingress"`
 }
 
 type EdgeConfig struct {
@@ -211,6 +218,22 @@ type EdgeRef struct {
 	Cert            string `yaml:"cert"`
 	Key             string `yaml:"key"`
 	EdgeFingerprint string `yaml:"edge_fingerprint"`
+	// Proxy, when set, is an HTTP proxy (http:// or https://, with optional
+	// user:password) the agent reaches the edge through, with CONNECT.
+	Proxy string `yaml:"proxy"`
+}
+
+// ProxyURL returns the parsed edge.proxy, or nil when it is unset. Validate
+// has checked it.
+func (e EdgeRef) ProxyURL() *url.URL {
+	if e.Proxy == "" {
+		return nil
+	}
+	u, err := url.Parse(e.Proxy)
+	if err != nil {
+		return nil
+	}
+	return u
 }
 
 type ReconnectConfig struct {
