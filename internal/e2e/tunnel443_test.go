@@ -36,18 +36,6 @@ type sharedStack struct {
 	ctx         context.Context
 }
 
-// freeAddr returns a loopback address with a port nothing listens on.
-func freeAddr(t *testing.T) string {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
-	return addr
-}
-
 func buildSharedStack(t *testing.T, maxConns int, readHeader time.Duration) *sharedStack {
 	t.Helper()
 	// Requests while no agent is connected (the cap test's probes) answer
@@ -72,7 +60,6 @@ func buildSharedStackWait(t *testing.T, maxConns int, readHeader time.Duration, 
 	coenRoots, _ := pki.CertPoolFromPEM(ca.CertPEM())
 	agentPair, _ := tls.X509KeyPair(acPEM, akPEM)
 	st := &sharedStack{
-		addr:        freeAddr(t),
 		publicRoots: publicRoots,
 		caPath:      caPath,
 		agentCert:   writeFile(t, dir, "agent.crt", acPEM),
@@ -86,7 +73,7 @@ func buildSharedStackWait(t *testing.T, maxConns int, readHeader time.Duration, 
 	e, err := edge.New(&config.EdgeConfig{
 		Ingress: config.IngressConfig{
 			Mode:              "standalone",
-			Listen:            st.addr,
+			Listen:            "127.0.0.1:0",
 			MaxConnections:    maxConns,
 			ReadHeaderTimeout: config.Duration(readHeader),
 			TLS:               config.TLSFiles{Cert: writeFile(t, dir, "public.crt", pcPEM), Key: writeFile(t, dir, "public.key", pkPEM)},
@@ -99,27 +86,25 @@ func buildSharedStackWait(t *testing.T, maxConns int, readHeader time.Duration, 
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The edge's own ingress listener, as Run opens it, with no tunnel
+	// listener: agents come in on the ingress only. (Taking the listener,
+	// rather than a port picked beforehand, means nothing dials a port that
+	// another test may hold meanwhile.)
+	ln, err := e.ListenIngress()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.addr = ln.Addr().String()
 	ctx, cancel := context.WithCancel(context.Background())
 	st.ctx = ctx
 	done := make(chan error, 1)
-	go func() { done <- e.Run(ctx) }()
+	go func() { done <- e.ServeWithHTTP3(ctx, nil, ln, nil) }()
 	t.Cleanup(func() {
 		cancel()
 		if err := <-done; err != nil {
 			t.Errorf("edge: %v", err)
 		}
 	})
-	for end := time.Now().Add(5 * time.Second); ; {
-		c, err := net.Dial("tcp", st.addr)
-		if err == nil {
-			_ = c.Close()
-			break
-		}
-		if time.Now().After(end) {
-			t.Fatalf("the edge did not listen on %s: %v", st.addr, err)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 	return st
 }
 

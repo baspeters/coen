@@ -169,10 +169,9 @@ func TestDialProxyTimeoutsAndFailures(t *testing.T) {
 		t.Fatalf("a cancelled dial: %v", err)
 	}
 
-	// Nothing listens there: the proxy cannot be reached.
-	ln, _ := net.Listen("tcp", "127.0.0.1:0")
-	gone := ln.Addr().String()
-	_ = ln.Close()
+	// Nothing listens there (port 1, so that no other test can hold it
+	// meanwhile): the proxy cannot be reached.
+	gone := "127.0.0.1:1"
 	if _, err := netx.Dial(context.Background(), addr, &url.URL{Scheme: "http", Host: gone}, time.Second); err == nil || !strings.Contains(err.Error(), "dial proxy") {
 		t.Fatalf("got %v", err)
 	}

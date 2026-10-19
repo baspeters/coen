@@ -61,3 +61,26 @@ func TestRunClosesListenersOnHTTP3Failure(t *testing.T) {
 		t.Fatal("the tunnel listener must be closed")
 	}
 }
+
+// With agents only on the ingress, Run opens no tunnel listener.
+func TestRunWithoutTunnelListener(t *testing.T) {
+	e, tunLn, ingressLn, _ := newTestEdge(t)
+	_ = tunLn.Close()
+	_ = ingressLn.Close()
+	e.cfg.Tunnel.Listen = ""
+	e.cfg.Tunnel.ShareIngress = true
+	e.cfg.Ingress.Listen = "127.0.0.1:0"
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- e.Run(ctx) }()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	// An ingress that cannot be opened, with no tunnel listener to close.
+	e.cfg.Ingress.Mode = "unknown"
+	if err := e.Run(context.Background()); err == nil {
+		t.Fatal("want an error")
+	}
+}

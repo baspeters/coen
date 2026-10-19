@@ -214,6 +214,10 @@ func (e *Edge) Run(ctx context.Context) error {
 	return e.ServeWithHTTP3(ctx, tunLn, ingressLn, h3)
 }
 
+// ListenIngress opens the ingress listener Run would, for a caller that
+// serves it with Serve or ServeWithHTTP3 itself.
+func (e *Edge) ListenIngress() (net.Listener, error) { return e.listenIngress() }
+
 func (e *Edge) listenIngress() (net.Listener, error) {
 	switch e.cfg.Ingress.Mode {
 	case "standalone":
