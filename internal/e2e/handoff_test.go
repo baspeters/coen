@@ -58,6 +58,9 @@ func TestAgentReplacedWithoutAGap(t *testing.T) {
 	// A steady stream of requests, and one slow one in flight on the old
 	// agent across the switch.
 	client := st.client()
+	// A new connection per request, so that each one is dispatched afresh
+	// (a kept-alive connection stays on the old agent while it drains).
+	fresh := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{DisableKeepAlives: true, TLSClientConfig: client.Transport.(*http.Transport).TLSClientConfig}}
 	var fails, served atomic.Int64
 	var wg sync.WaitGroup
 	stopLoad := make(chan struct{})
@@ -71,7 +74,7 @@ func TestAgentReplacedWithoutAGap(t *testing.T) {
 					return
 				default:
 				}
-				resp, err := client.Get("https://" + st.addr + "/r")
+				resp, err := fresh.Get("https://" + st.addr + "/r")
 				if err != nil || resp.StatusCode != 200 {
 					fails.Add(1)
 				} else {
