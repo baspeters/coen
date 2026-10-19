@@ -976,14 +976,14 @@ sudo systemctl reload coen-agent     # apply config changes, or a newly installe
    `drain_timeout` cuts them; clients reconnect to the new process.
 
 This needs the systemd unit with `Type=notify`, which the `.deb`, `.rpm` and `.apk` packages
-and `coen install` ship from v0.6.0 on (rewrite an older unit with `coen install agent
---force`, or edit it), and an edge from v0.6.0 on for a reload without a gap. An edge from
+and `coen install` ship from v0.5.1 on (rewrite an older unit with `coen install agent
+--force`, or edit it), and an edge from v0.5.1 on for a reload without a gap. An edge from
 v0.4.0 on does the handoff in step 2 but has no `agent_wait`, so the few requests in step 3
 can fail. An older edge refuses the new process as a duplicate while the old one is connected,
 so the new process connects only once the old one has finished draining (up to
 `drain_timeout`), and requests in between fail, as with a restart. Without a
 `Type=notify` unit, `SIGHUP` only re-reads `log.level`, and `systemctl restart` keeps the gap.
-A `Type=notify` unit also needs a binary from v0.6.0 on: an older one never reports that it is
+A `Type=notify` unit also needs a binary from v0.5.1 on: an older one never reports that it is
 ready, so systemd gives up on starting it after `TimeoutStartSec` (90 seconds). Roll the binary
 and the unit back together.
 
