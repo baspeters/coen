@@ -1,6 +1,7 @@
 package obs
 
 import (
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,13 +20,15 @@ type State struct {
 	handshakeFail     atomic.Int64
 	handshakeRejected atomic.Int64 // edge: unauthenticated/incompatible peers refused at TLS
 	handshakeDup      atomic.Int64 // edge: authenticated agents refused as a duplicate fingerprint
+	handshakeCapped   atomic.Int64 // edge: agents refused at the per-certificate session cap
 	lastError         atomic.Value // string
 	peerFP            atomic.Value // string
 	selfFP            atomic.Value // string: this daemon's own certificate fingerprint
 
-	agentsMu sync.Mutex
-	agents   map[string]agentEntry // edge: connected agents by fingerprint
-	expected map[string]bool       // edge: agent fingerprints the config allows
+	agentsMu    sync.Mutex
+	agents      map[*AgentSession]struct{} // edge: connected agent sessions (several may share a fingerprint)
+	expected    map[string]bool            // edge: agent fingerprints the config allows
+	agentTotals map[string]*atomic.Int64   // edge: streams opened per fingerprint, ever
 
 	routesMu       sync.Mutex
 	routes         map[string]*RouteStats // per configured route pattern
@@ -35,10 +38,57 @@ type State struct {
 	started        time.Time
 }
 
-// agentEntry is the per-agent info the edge tracks for a connected tunnel.
-type agentEntry struct {
-	since time.Time
-	addr  string
+// AgentSession is one connected agent tunnel on the edge. Several sessions may
+// share a fingerprint (load-balanced agents with a shared certificate). Its
+// methods are safe on a nil receiver.
+type AgentSession struct {
+	fp       string
+	addr     string
+	since    time.Time
+	active   atomic.Int64
+	total    *atomic.Int64 // the fingerprint's lifetime stream counter
+	draining atomic.Bool   // out of the edge's pool; in-flight streams finishing
+}
+
+// Active returns the session's open streams, used to balance by least
+// connections.
+func (a *AgentSession) Active() int64 {
+	if a == nil {
+		return 0
+	}
+	return a.active.Load()
+}
+
+// Reserve counts a stream as open while it is being set up, so concurrent
+// least_conn picks see it. Follow with Commit once it is set up, or with
+// StreamClosed if it could not be.
+func (a *AgentSession) Reserve() {
+	if a != nil {
+		a.active.Add(1)
+	}
+}
+
+// Commit adds a reserved stream to the session's lifetime total. The total
+// only ever grows, as a Prometheus counter must.
+func (a *AgentSession) Commit() {
+	if a != nil {
+		a.total.Add(1)
+	}
+}
+
+// StreamClosed counts a stream on this session that ended.
+func (a *AgentSession) StreamClosed() {
+	if a != nil {
+		a.active.Add(-1)
+	}
+}
+
+// SetDraining marks the session as taken out of the pool while its in-flight
+// streams finish.
+func (a *AgentSession) SetDraining() {
+	if a != nil {
+		a.draining.Store(true)
+	}
 }
 
 // SetDraining records that shutdown has started. A starting replacement reads
@@ -52,29 +102,47 @@ func (s *State) Role() string { return s.role }
 // NewState returns a State tagged with the daemon's role ("edge" or "agent").
 func NewState(role string) *State { return &State{role: role, started: time.Now()} }
 
-// AgentConnected records a live edge<-agent tunnel keyed by fingerprint, with
-// the agent's remote address.
-func (s *State) AgentConnected(fp, addr string) {
+// NewAgentSession prepares the accounting for an agent session of fingerprint
+// fp from addr without listing it as connected; AddAgent lists it once the
+// edge has accepted it.
+func (s *State) NewAgentSession(fp, addr string) *AgentSession {
+	s.agentsMu.Lock()
+	defer s.agentsMu.Unlock()
+	if s.agentTotals == nil {
+		s.agentTotals = make(map[string]*atomic.Int64)
+	}
+	total := s.agentTotals[fp]
+	if total == nil {
+		total = new(atomic.Int64)
+		s.agentTotals[fp] = total
+	}
+	return &AgentSession{fp: fp, addr: addr, since: time.Now(), total: total}
+}
+
+// AddAgent lists a prepared session as connected.
+func (s *State) AddAgent(a *AgentSession) {
 	s.agentsMu.Lock()
 	defer s.agentsMu.Unlock()
 	if s.agents == nil {
-		s.agents = make(map[string]agentEntry)
+		s.agents = make(map[*AgentSession]struct{})
 	}
-	s.agents[fp] = agentEntry{since: time.Now(), addr: addr}
+	s.agents[a] = struct{}{}
 }
 
-// AgentDisconnected removes a tunnel.
-func (s *State) AgentDisconnected(fp string) {
+// AgentDisconnected removes a session; calling it again is harmless.
+func (s *State) AgentDisconnected(a *AgentSession) {
 	s.agentsMu.Lock()
 	defer s.agentsMu.Unlock()
-	delete(s.agents, fp)
+	delete(s.agents, a)
 }
 
-// AgentInfo describes one connected agent in a Snapshot.
+// AgentInfo describes one connected agent session in a Snapshot.
 type AgentInfo struct {
 	Fingerprint    string    `json:"fingerprint"`
 	RemoteAddr     string    `json:"remote_addr,omitempty"`
 	ConnectedSince time.Time `json:"connected_since"`
+	ActiveStreams  int64     `json:"active_streams"`
+	Draining       bool      `json:"draining,omitempty"`
 }
 
 func (s *State) SetConnected(fp string) {
@@ -123,7 +191,11 @@ func (s *State) HandshakeRejected() { s.handshakeRejected.Add(1) }
 // session already owns its fingerprint (a cloned certificate, or a stray
 // reconnect racing the old session).
 func (s *State) HandshakeDuplicate() { s.handshakeDup.Add(1) }
-func (s *State) SetError(e string)   { s.lastError.Store(e) }
+
+// HandshakeCapped counts an agent refused because its (shared) certificate
+// already holds the maximum number of sessions.
+func (s *State) HandshakeCapped()  { s.handshakeCapped.Add(1) }
+func (s *State) SetError(e string) { s.lastError.Store(e) }
 
 // SetSelfFingerprint records this daemon's own certificate fingerprint, set
 // once at startup. It lets an operator cross-check the two ends: the agent's
@@ -145,6 +217,7 @@ type Snapshot struct {
 	HandshakeFail     int64       `json:"handshake_fail"`
 	HandshakeRejected int64       `json:"handshake_rejected"`
 	HandshakeDup      int64       `json:"handshake_duplicate"`
+	HandshakeCapped   int64       `json:"handshake_capped"`
 	LastError         string      `json:"last_error,omitempty"`
 	SelfFingerprint   string      `json:"self_fingerprint,omitempty"`
 	PeerFingerprint   string      `json:"peer_fingerprint,omitempty"`
@@ -175,6 +248,7 @@ func (s *State) snapshot(routes []RouteSnapshot) Snapshot {
 		HandshakeFail:     s.handshakeFail.Load(),
 		HandshakeRejected: s.handshakeRejected.Load(),
 		HandshakeDup:      s.handshakeDup.Load(),
+		HandshakeCapped:   s.handshakeCapped.Load(),
 		LastError:         loadStr(&s.lastError),
 		SelfFingerprint:   loadStr(&s.selfFP),
 		PeerFingerprint:   loadStr(&s.peerFP),
@@ -187,9 +261,16 @@ func (s *State) snapshot(routes []RouteSnapshot) Snapshot {
 		snap.BytesOut += r.BytesOut
 	}
 	s.agentsMu.Lock()
-	for fp, e := range s.agents {
-		snap.Agents = append(snap.Agents, AgentInfo{Fingerprint: fp, RemoteAddr: e.addr, ConnectedSince: e.since})
+	for a := range s.agents {
+		snap.Agents = append(snap.Agents, AgentInfo{Fingerprint: a.fp, RemoteAddr: a.addr, ConnectedSince: a.since, ActiveStreams: a.active.Load(), Draining: a.draining.Load()})
 	}
 	s.agentsMu.Unlock()
+	// A stable order: by fingerprint, then by when the session connected.
+	sort.Slice(snap.Agents, func(i, j int) bool {
+		if snap.Agents[i].Fingerprint != snap.Agents[j].Fingerprint {
+			return snap.Agents[i].Fingerprint < snap.Agents[j].Fingerprint
+		}
+		return snap.Agents[i].ConnectedSince.Before(snap.Agents[j].ConnectedSince)
+	})
 	return snap
 }

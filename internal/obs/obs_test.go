@@ -228,8 +228,8 @@ func TestSnapshotConnectedSinceOmitZero(t *testing.T) {
 
 func TestAgentSet(t *testing.T) {
 	var s State
-	s.AgentConnected("AA", "10.0.0.1:1000")
-	s.AgentConnected("BB", "10.0.0.2:2000")
+	aa := connectAgent(&s, "AA", "10.0.0.1:1000")
+	connectAgent(&s, "BB", "10.0.0.2:2000")
 	snap := s.Snapshot()
 	if len(snap.Agents) != 2 {
 		t.Fatalf("agents = %d, want 2", len(snap.Agents))
@@ -241,9 +241,45 @@ func TestAgentSet(t *testing.T) {
 	if byFP["AA"] != "10.0.0.1:1000" {
 		t.Fatalf("agent AA remote_addr = %q, want 10.0.0.1:1000", byFP["AA"])
 	}
-	s.AgentDisconnected("AA")
+	s.AgentDisconnected(aa)
 	if got := len(s.Snapshot().Agents); got != 1 {
 		t.Fatalf("agents after disconnect = %d, want 1", got)
+	}
+}
+
+// Several sessions may share a fingerprint; each is tracked and counted on its
+// own, and the fingerprint's lifetime total spans them.
+func TestAgentSessionsShareFingerprint(t *testing.T) {
+	s := NewState("edge")
+	a1 := connectAgent(s, "FP", "10.0.0.1:1")
+	a2 := connectAgent(s, "FP", "10.0.0.2:1")
+	a1.Reserve()
+	a1.Commit()
+	a1.Reserve()
+	a1.Commit()
+	a2.Reserve()
+	a2.Commit()
+	a1.StreamClosed()
+	snap := s.Snapshot()
+	if len(snap.Agents) != 2 {
+		t.Fatalf("sessions = %d, want 2", len(snap.Agents))
+	}
+	if a1.Active() != 1 || a2.Active() != 1 {
+		t.Fatalf("active = %d/%d", a1.Active(), a2.Active())
+	}
+	if got := s.Detail().AgentStreams["FP"]; got != 3 {
+		t.Fatalf("FP lifetime streams = %d, want 3", got)
+	}
+	s.AgentDisconnected(a1)
+	if snap := s.Snapshot(); len(snap.Agents) != 1 || snap.Agents[0].RemoteAddr != "10.0.0.2:1" {
+		t.Fatalf("after disconnect: %+v", snap.Agents)
+	}
+	var none *AgentSession
+	none.Reserve()
+	none.Commit()
+	none.StreamClosed()
+	if none.Active() != 0 {
+		t.Fatal("a nil session has no streams")
 	}
 }
 

@@ -235,8 +235,18 @@ func CheckEdge(cfg *config.EdgeConfig) []Result {
 	}
 
 	for _, r := range cfg.Routes {
-		if err := pki.ValidateFingerprint(r.AgentFingerprint); err != nil {
-			out = append(out, fail("config: fingerprint "+r.Host, err.Error(), "agent_fingerprint must be the SHA256:... value printed by `coen cert agent`"))
+		fps := r.Fingerprints()
+		var bad error
+		for _, fp := range fps {
+			if err := pki.ValidateFingerprint(fp); err != nil {
+				bad = fmt.Errorf("%s: %w", fp, err)
+				break
+			}
+		}
+		if bad != nil {
+			out = append(out, fail("config: fingerprint "+r.Host, bad.Error(), "each agent fingerprint must be the SHA256:... value printed by `coen cert agent`"))
+		} else if n := len(fps); n > 1 {
+			out = append(out, ok("config: fingerprint "+r.Host, fmt.Sprintf("%d agents, well-formed", n)))
 		} else {
 			out = append(out, ok("config: fingerprint "+r.Host, "well-formed"))
 		}

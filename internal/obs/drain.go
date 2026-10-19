@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/baspeters/coen/internal/netx"
 )
 
 // DrainWait waits for wg to complete, up to timeout. A non-positive timeout
@@ -11,14 +13,7 @@ import (
 // "drain.timeout" warning via log. It is shared by the edge and agent shutdown
 // paths, which drain in-flight work the same way.
 func DrainWait(log *slog.Logger, wg *sync.WaitGroup, timeout time.Duration) {
-	if timeout <= 0 {
-		return
-	}
-	done := make(chan struct{})
-	go func() { wg.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(timeout):
+	if timeout > 0 && !netx.Bounded(timeout, wg.Wait) {
 		log.Warn("drain.timeout", "after", timeout.String())
 	}
 }

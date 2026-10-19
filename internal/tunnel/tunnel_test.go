@@ -15,13 +15,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/baspeters/coen/internal/pki"
 	"github.com/hashicorp/yamux"
 )
 
 func TestPreambleRoundTrip(t *testing.T) {
 	var buf bytes.Buffer
 	in := Preamble{ConnID: "abc123", ClientAddr: "203.0.113.7:5555"}
-	if err := WritePreamble(&buf, in); err != nil {
+	if err := writePreamble(&buf, in); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	// Append trailing payload to prove ReadPreamble stops at the boundary.
@@ -38,14 +39,10 @@ func TestPreambleRoundTrip(t *testing.T) {
 	}
 }
 
-func TestWritePreambleTooLarge(t *testing.T) {
+func TestEncodePreambleTooLarge(t *testing.T) {
 	big := Preamble{ConnID: "x", ClientAddr: strings.Repeat("a", maxPreamble+100)}
-	var buf bytes.Buffer
-	if err := WritePreamble(&buf, big); err == nil {
-		t.Fatal("expected error for preamble exceeding max size")
-	}
-	if buf.Len() != 0 {
-		t.Fatalf("nothing should be written on a size-check failure, got %d bytes", buf.Len())
+	if b, err := EncodePreamble(big); err == nil || b != nil {
+		t.Fatalf("expected an error and no bytes for an oversized preamble, got %d bytes, %v", len(b), err)
 	}
 }
 
@@ -194,7 +191,7 @@ func TestClientTLSConfigSetsServerName(t *testing.T) {
 func TestPreambleRoundTripHost(t *testing.T) {
 	var buf bytes.Buffer
 	in := Preamble{ConnID: "abc", ClientAddr: "1.2.3.4:5", Host: "app.example.com"}
-	if err := WritePreamble(&buf, in); err != nil {
+	if err := writePreamble(&buf, in); err != nil {
 		t.Fatal(err)
 	}
 	out, err := ReadPreamble(&buf)
@@ -230,16 +227,75 @@ func TestReadPreambleLengthPrefixOnlyIsTruncated(t *testing.T) {
 	}
 }
 
-type countingWriter struct{ writes int }
-
-func (c *countingWriter) Write(b []byte) (int, error) { c.writes++; return len(b), nil }
-
-func TestWritePreambleIsOneWrite(t *testing.T) {
-	var w countingWriter
-	if err := WritePreamble(&w, Preamble{ConnID: "c", Host: "h"}); err != nil {
+// The edge negotiates coen/2 with a client that asks for it, and still accepts
+// a client that asks for something else (falling back to version 1).
+func TestALPNNegotiationAndFallback(t *testing.T) {
+	ca, err := pki.CreateCA()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if w.writes != 1 {
-		t.Fatalf("writes = %d, want 1", w.writes)
+	pool, _ := pki.CertPoolFromPEM(ca.CertPEM())
+	sc, sk, _ := ca.IssueServer("127.0.0.1")
+	cc, ck, _ := ca.IssueClient("a")
+	srvCert, _ := tls.X509KeyPair(sc, sk)
+	cliCert, _ := tls.X509KeyPair(cc, ck)
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", ServerTLSConfig(pool, srvCert))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() { _ = c.(*tls.Conn).Handshake(); _ = c.Close() }()
+		}
+	}()
+	for _, offer := range [][]string{{ALPNv2}, {"coen/3"}, nil} {
+		cfg := ClientTLSConfig(pool, cliCert, "127.0.0.1")
+		cfg.NextProtos = offer
+		c, err := tls.Dial("tcp", ln.Addr().String(), cfg)
+		if err != nil {
+			t.Fatalf("client offering %v could not connect: %v", offer, err)
+		}
+		got := c.ConnectionState().NegotiatedProtocol
+		_ = c.Close()
+		want := ""
+		if len(offer) == 1 && offer[0] == ALPNv2 {
+			want = ALPNv2
+		}
+		if got != want {
+			t.Fatalf("offer %v negotiated %q, want %q", offer, got, want)
+		}
+	}
+}
+
+// writePreamble encodes p and writes it to w, for tests.
+func writePreamble(w io.Writer, p Preamble) error {
+	b, err := EncodePreamble(p)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(b)
+	return err
+}
+
+// EncodePreamble returns one whole frame (length prefix and body), so the
+// edge sends it in a single Write and an agent never sees a lone prefix.
+func TestEncodePreambleIsOneFrame(t *testing.T) {
+	want := Preamble{ConnID: "c", Host: "h", ClientAddr: "1.2.3.4:5"}
+	b, err := EncodePreamble(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := bytes.NewReader(b)
+	got, err := ReadPreamble(r)
+	if err != nil || got.ConnID != want.ConnID || got.Host != want.Host || got.ClientAddr != want.ClientAddr {
+		t.Fatalf("decoded %+v, %v", got, err)
+	}
+	if r.Len() != 0 {
+		t.Fatalf("%d bytes left over after the frame", r.Len())
 	}
 }

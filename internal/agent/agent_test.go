@@ -2,9 +2,11 @@ package agent
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -19,6 +21,7 @@ import (
 	"github.com/baspeters/coen/internal/pki"
 	"github.com/baspeters/coen/internal/route"
 	"github.com/baspeters/coen/internal/tunnel"
+	"github.com/hashicorp/yamux"
 )
 
 func TestAgentBridgesStreamToService(t *testing.T) {
@@ -69,8 +72,13 @@ func TestAgentBridgesStreamToService(t *testing.T) {
 		if err != nil {
 			return
 		}
-		_ = tunnel.WritePreamble(stream, tunnel.Preamble{ConnID: "test1", ClientAddr: "203.0.113.1:1234"})
+		_ = writePreamble(stream, tunnel.Preamble{ConnID: "test1", ClientAddr: "203.0.113.1:1234"})
 		_, _ = stream.Write([]byte("ping\n"))
+		// The session negotiated version 2, so the agent accepts first.
+		if err := tunnel.AwaitAccept(stream, 3*time.Second); err != nil {
+			got <- "no accept: " + err.Error()
+			return
+		}
 		line, _ := bufio.NewReader(stream).ReadString('\n')
 		got <- line
 	}()
@@ -218,6 +226,8 @@ func TestAgentRunReturnsOnCtxCancelWhileConnected(t *testing.T) {
 			return
 		}
 		defer sess.Close()
+		// Like a real edge, it answers the agent's drain request.
+		go tunnel.ServeControl(sess, func() {})
 		<-sess.CloseChan()
 	}()
 
@@ -492,7 +502,7 @@ func TestHandleStreamServiceDialFailure(t *testing.T) {
 	_ = reserve.Close()
 
 	streamClosed := openStreamAndWrite(t, edgeLn, func(stream net.Conn) error {
-		return tunnel.WritePreamble(stream, tunnel.Preamble{ConnID: "dialfail", ClientAddr: "203.0.113.1:1234"})
+		return writePreamble(stream, tunnel.Preamble{ConnID: "dialfail", ClientAddr: "203.0.113.1:1234"})
 	})
 
 	cfg := &config.AgentConfig{
@@ -648,8 +658,8 @@ func TestHandleStreamRoutesToBackendByHost(t *testing.T) {
 	}
 
 	client, streamSide := net.Pipe()
-	go a.handleStream(context.Background(), streamSide)
-	if err := tunnel.WritePreamble(client, tunnel.Preamble{ConnID: "x", Host: "app.example.com"}); err != nil {
+	go a.handleStream(context.Background(), streamSide, false)
+	if err := writePreamble(client, tunnel.Preamble{ConnID: "x", Host: "app.example.com"}); err != nil {
 		t.Fatal(err)
 	}
 	buf := make([]byte, 32)
@@ -680,8 +690,8 @@ func TestHandleStreamNoRouteReturns502(t *testing.T) {
 		routes: route.Build([]route.Entry[agentRoute]{{Pattern: "app.example.com", Value: agentRoute{service: "127.0.0.1:1"}}}),
 	}
 	client, streamSide := net.Pipe()
-	go a.handleStream(context.Background(), streamSide)
-	if err := tunnel.WritePreamble(client, tunnel.Preamble{ConnID: "x", Host: "unknown.example.com"}); err != nil {
+	go a.handleStream(context.Background(), streamSide, false)
+	if err := writePreamble(client, tunnel.Preamble{ConnID: "x", Host: "unknown.example.com"}); err != nil {
 		t.Fatal(err)
 	}
 	// A host the agent has no backend for gets a 502, not an empty reply.
@@ -707,8 +717,8 @@ func TestHandleStreamBackendUnreachableReturns502(t *testing.T) {
 		routes: route.Build([]route.Entry[agentRoute]{{Pattern: "app.example.com", Value: agentRoute{service: deadAddr}}}),
 	}
 	client, streamSide := net.Pipe()
-	go a.handleStream(context.Background(), streamSide)
-	if err := tunnel.WritePreamble(client, tunnel.Preamble{ConnID: "x", Host: "app.example.com"}); err != nil {
+	go a.handleStream(context.Background(), streamSide, false)
+	if err := writePreamble(client, tunnel.Preamble{ConnID: "x", Host: "app.example.com"}); err != nil {
 		t.Fatal(err)
 	}
 	got := readStreamResponse(t, client)
@@ -726,7 +736,7 @@ func TestAgentDrainStreams(t *testing.T) {
 	}
 	a.inflight.Add(1) // simulate one in-flight stream
 	done := make(chan struct{})
-	go func() { a.drainStreams(); close(done) }()
+	go func() { a.drainStreamsFor(a.cfg.Drain.Duration()); close(done) }()
 	select {
 	case <-done:
 		t.Fatal("drainStreams returned before in-flight finished")
@@ -747,7 +757,7 @@ func TestAgentDrainStreamsTimeoutAndImmediate(t *testing.T) {
 	}
 	a.inflight.Add(1) // never Done: exercise the timeout branch
 	done := make(chan struct{})
-	go func() { a.drainStreams(); close(done) }()
+	go func() { a.drainStreamsFor(a.cfg.Drain.Duration()); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
@@ -757,6 +767,76 @@ func TestAgentDrainStreamsTimeoutAndImmediate(t *testing.T) {
 
 	a0 := &Agent{cfg: &config.AgentConfig{Drain: 0}, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	a0.inflight.Add(1)
-	a0.drainStreams() // drain_timeout 0: returns immediately
+	a0.drainStreamsFor(a0.cfg.Drain.Duration()) // drain_timeout 0: returns immediately
 	a0.inflight.Done()
+}
+
+// With a drain_timeout too short for the handoff, a version 2 agent still asks
+// the edge to drain and sends GoAway, but does not wait for the
+// acknowledgement: its in-flight streams keep the whole drain_timeout.
+func TestShortDrainDoesNotWaitForAck(t *testing.T) {
+	a2, b2 := net.Pipe()
+	edgeSess, _ := tunnel.ServerSession(a2)
+	defer edgeSess.Close()
+	agentSess, _ := tunnel.ClientSession(b2)
+	asked := make(chan struct{}, 1)
+	go tunnel.ServeControl(edgeSess, func() {
+		asked <- struct{}{}
+		time.Sleep(time.Hour) // never acknowledges
+	})
+	budget := minHandoff / 4
+	a := &Agent{
+		cfg:   &config.AgentConfig{Drain: config.Duration(budget)},
+		log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		state: &obs.State{},
+	}
+	a.inflight.Add(1) // one in-flight stream, finishing well inside the budget
+	goAway := make(chan error, 1)
+	go func() {
+		time.Sleep(budget / 4)
+		_, err := edgeSess.OpenStream() // the edge's next pick, mid-drain
+		goAway <- err
+		time.Sleep(budget / 4)
+		a.inflight.Done()
+	}()
+	start := time.Now()
+	a.shutdownSession(context.Background(), agentSess, true, func() {}, nil)
+	if err := <-goAway; !errors.Is(err, yamux.ErrRemoteGoAway) {
+		t.Fatalf("the edge's open during the drain: %v, want ErrRemoteGoAway", err)
+	}
+	if d := time.Since(start); d < budget/2 || d > budget {
+		t.Fatalf("shutdown took %v, want the in-flight stream's time (about %v)", d, budget/2)
+	}
+	if !agentSess.IsClosed() {
+		t.Fatal("the session must be closed after draining")
+	}
+	select {
+	case <-asked:
+	case <-time.After(time.Second):
+		t.Fatal("the edge was not asked to take the agent out of its pool")
+	}
+}
+
+// Shutting down on a session that is already closed skips the handoff (no
+// drain request, no acknowledgement wait) and returns promptly.
+func TestShutdownOnDeadSessionSkipsHandoff(t *testing.T) {
+	a2, b2 := net.Pipe()
+	edgeSess, _ := tunnel.ServerSession(a2)
+	agentSess, _ := tunnel.ClientSession(b2)
+	_ = edgeSess.Close()
+	<-agentSess.CloseChan()
+	var logs bytes.Buffer
+	a := &Agent{
+		cfg:   &config.AgentConfig{Drain: config.Duration(10 * time.Second)},
+		log:   slog.New(slog.NewTextHandler(&logs, nil)),
+		state: &obs.State{},
+	}
+	start := time.Now()
+	a.shutdownSession(context.Background(), agentSess, true, func() {}, nil)
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("shutdown on a dead session took %v", d)
+	}
+	if strings.Contains(logs.String(), "drain.no_ack") {
+		t.Fatalf("a dead session must not warn about a missing acknowledgement:\n%s", logs.String())
+	}
 }

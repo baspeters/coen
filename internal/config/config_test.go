@@ -600,7 +600,7 @@ func TestEdgeConfigValidateRoutes(t *testing.T) {
 	}{
 		{"no routes", func(c *EdgeConfig) { c.Routes = nil }, "at least one route"},
 		{"missing host", func(c *EdgeConfig) { c.Routes = []EdgeRoute{{AgentFingerprint: "AA"}} }, "host is required"},
-		{"missing fingerprint", func(c *EdgeConfig) { c.Routes = []EdgeRoute{{Host: "a.example.com"}} }, "agent_fingerprint is required"},
+		{"missing fingerprint", func(c *EdgeConfig) { c.Routes = []EdgeRoute{{Host: "a.example.com"}} }, "agent_fingerprint or agent_fingerprints is required"},
 		{"bad pattern", func(c *EdgeConfig) { c.Routes = []EdgeRoute{{Host: "*.*.com", AgentFingerprint: "AA"}} }, "invalid"},
 	}
 	for _, tc := range cases {

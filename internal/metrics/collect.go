@@ -51,11 +51,13 @@ func Collect(d obs.Detail, version string) []Family {
 
 	switch role {
 	case "edge":
-		hs.Help = "Incoming agent tunnel connections, by result: ok (authenticated and registered), fail (authenticated but not allowed by any route), duplicate (authenticated but refused because a live session owns the fingerprint), rejected (refused at the TLS handshake)."
+		hs.Help = "Incoming agent tunnel connections, by result: ok (authenticated and registered), fail (authenticated but not allowed by any route, or not answering the readiness ping), duplicate (authenticated but refused because a live session owns the fingerprint), capped (refused at the per-certificate session cap), rejected (refused at the TLS handshake)."
 		hs.Samples = append(hs.Samples,
 			Sample{Labels: []Label{{"result", "rejected"}}, Value: float64(d.HandshakeRejected)},
-			Sample{Labels: []Label{{"result", "duplicate"}}, Value: float64(d.HandshakeDup)})
-		fams = append(fams, hs, edgeAgents(d),
+			Sample{Labels: []Label{{"result", "duplicate"}}, Value: float64(d.HandshakeDup)},
+			Sample{Labels: []Label{{"result", "capped"}}, Value: float64(d.HandshakeCapped)})
+		fams = append(fams, edgeAgents(d)...)
+		fams = append(fams, hs,
 			Family{Name: "coen_ingress_header_timeouts_total", Help: "Ingress connections closed at read_header_timeout without sending any request byte, such as idle browser preconnects. Not rejected requests.", Type: Counter,
 				Samples: []Sample{{Value: float64(d.HeaderTimeouts)}}},
 			failures("coen_ingress_rejected_total", "Ingress requests the edge could not forward, by route and reason.", d, obs.EdgeUnroutedReasons, obs.EdgeRouteReasons))
@@ -78,16 +80,29 @@ func Collect(d obs.Detail, version string) []Family {
 // edgeAgents reports each agent the config allows as connected (1) or not (0).
 // The edge refuses any fingerprint outside the config, which is never reloaded
 // at runtime, so the configured set covers every agent that can connect.
-func edgeAgents(d obs.Detail) Family {
-	connected := make(map[string]bool, len(d.Agents))
+func edgeAgents(d obs.Detail) []Family {
+	connectedFP := make(map[string]bool, len(d.Agents)) // any session, draining included
+	sessions := make(map[string]int, len(d.Agents))     // sessions taking new traffic
+	active := make(map[string]int64, len(d.Agents))     // open streams, draining sessions included
 	for _, a := range d.Agents {
-		connected[a.Fingerprint] = true
+		connectedFP[a.Fingerprint] = true
+		if !a.Draining {
+			sessions[a.Fingerprint]++
+		}
+		active[a.Fingerprint] += a.ActiveStreams
 	}
-	f := Family{Name: "coen_agent_connected", Help: "Whether an agent is connected (1) or not (0), by certificate fingerprint.", Type: Gauge}
+	connected := Family{Name: "coen_agent_connected", Help: "Whether an agent is connected (1) or not (0), by certificate fingerprint; a draining agent still counts as connected (see coen_agent_sessions for agents taking new traffic).", Type: Gauge}
+	count := Family{Name: "coen_agent_sessions", Help: "Tunnel sessions taking new traffic per agent fingerprint (draining ones excluded); more than 1 only with allow_shared_cert.", Type: Gauge}
+	open := Family{Name: "coen_agent_streams_active", Help: "Streams open or being set up right now, by agent fingerprint (summed over its sessions); the load least_conn balances on.", Type: Gauge}
+	total := Family{Name: "coen_agent_streams_total", Help: "Streams opened since start, by agent fingerprint; shows how load is balanced.", Type: Counter}
 	for _, fp := range d.ExpectedAgents {
-		f.Samples = append(f.Samples, Sample{Labels: []Label{{"fingerprint", fp}}, Value: boolf(connected[fp])})
+		l := []Label{{"fingerprint", fp}}
+		connected.Samples = append(connected.Samples, Sample{Labels: l, Value: boolf(connectedFP[fp])})
+		count.Samples = append(count.Samples, Sample{Labels: l, Value: float64(sessions[fp])})
+		open.Samples = append(open.Samples, Sample{Labels: l, Value: float64(active[fp])})
+		total.Samples = append(total.Samples, Sample{Labels: l, Value: float64(d.AgentStreams[fp])})
 	}
-	return f
+	return []Family{connected, count, open, total}
 }
 
 // failures builds a reason-labelled counter family: every reason the role is

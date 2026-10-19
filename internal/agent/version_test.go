@@ -31,10 +31,10 @@ func driveStream(t *testing.T, a *Agent, edgeVersion string) {
 	t.Helper()
 	client, stream := net.Pipe()
 	go func() {
-		_ = tunnel.WritePreamble(client, tunnel.Preamble{ConnID: "c1", Host: "x", EdgeVersion: edgeVersion})
+		_ = writePreamble(client, tunnel.Preamble{ConnID: "c1", Host: "x", EdgeVersion: edgeVersion})
 		_, _ = io.Copy(io.Discard, client)
 	}()
-	a.handleStream(context.Background(), stream)
+	a.handleStream(context.Background(), stream, false)
 }
 
 func TestHandleStreamWarnsOnVersionMismatch(t *testing.T) {
