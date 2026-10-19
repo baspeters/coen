@@ -42,10 +42,23 @@ func TestAltSvcInjection(t *testing.T) {
 			if split {
 				r = oneByte{r}
 			}
-			got, err := io.ReadAll(newAltSvcConn(&pipeConn{r: r}, v))
+			got, err := io.ReadAll(newAltSvcConn(&pipeConn{r: r}, v, false))
 			if err != nil || string(got) != c.want {
 				t.Errorf("case %d split=%v: %q (%v), want %q", i, split, got, err, c.want)
 			}
+		}
+	}
+	// On a route kept off HTTP/3, the service's own Alt-Svc lines (folded
+	// ones too) give way to the edge's value; other fields stay in order.
+	for in, want := range map[string]string{
+		"HTTP/1.1 200 OK\r\nA: 1\r\nAlt-Svc: h3=\":443\"\r\nB: 2\r\nalt-svc: h2=\":8443\"\r\n\r\nbody": "HTTP/1.1 200 OK\r\nA: 1\r\nB: 2\r\nAlt-Svc: clear\r\n\r\nbody",
+		"HTTP/1.1 200 OK\r\nAlt-Svc: h3=\":443\";\r\n ma=60\r\nC: 3\r\n\r\n":                           "HTTP/1.1 200 OK\r\nC: 3\r\nAlt-Svc: clear\r\n\r\n",
+		"HTTP/1.1 204 No Content\r\n\r\n":                                                              "HTTP/1.1 204 No Content\r\nAlt-Svc: clear\r\n\r\n",
+		// A folded line of another field is not an Alt-Svc field.
+		"HTTP/1.1 200 OK\r\nX-Note: a\r\n alt-svc: b\r\n\r\n": "HTTP/1.1 200 OK\r\nX-Note: a\r\n alt-svc: b\r\nAlt-Svc: clear\r\n\r\n",
+	} {
+		if got, err := io.ReadAll(newAltSvcConn(&pipeConn{r: strings.NewReader(in)}, "clear", true)); err != nil || string(got) != want {
+			t.Errorf("replace %q: %q (%v), want %q", in, got, err, want)
 		}
 	}
 	// A bare-LF head is passed on as soon as it is complete, not held until
@@ -54,13 +67,13 @@ func TestAltSvcInjection(t *testing.T) {
 	defer pw.Close()
 	go func() { _, _ = pw.Write([]byte("HTTP/1.1 200 OK\nContent-Length: 2\n\nhi")) }()
 	buf := make([]byte, 64)
-	n, err := newAltSvcConn(pr, v).Read(buf)
+	n, err := newAltSvcConn(pr, v, false).Read(buf)
 	if err != nil || !strings.HasPrefix("HTTP/1.1 200 OK\nContent-Length: 2\n\nhi", string(buf[:n])) || n == 0 {
 		t.Fatalf("bare-LF head read = %q, %v", buf[:n], err)
 	}
 	// A head larger than maxHeaderBytes passes through unchanged.
 	big := "HTTP/1.1 200 OK\r\nX: " + strings.Repeat("a", maxHeaderBytes) + "\r\n\r\n"
-	if got, _ := io.ReadAll(newAltSvcConn(&pipeConn{r: strings.NewReader(big)}, v)); string(got) != big {
+	if got, _ := io.ReadAll(newAltSvcConn(&pipeConn{r: strings.NewReader(big)}, v, false)); string(got) != big {
 		t.Fatal("an oversized head was changed")
 	}
 }

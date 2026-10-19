@@ -112,6 +112,10 @@ func (i IngressConfig) AltSvcHeaderFor(port int) string {
 // session among them. AllowSharedCert lets several agents run with the same
 // certificate, so one fingerprint can have several live sessions; without it,
 // a second connection with a fingerprint that is already live is refused.
+//
+// HTTP3 set to false keeps the route's hosts off HTTP/3 when the ingress
+// serves it: for a service that ties state to its connection (NTLM or
+// Negotiate authentication), which HTTP/3 cannot carry.
 type EdgeRoute struct {
 	Host              string   `yaml:"host"`
 	AgentFingerprint  string   `yaml:"agent_fingerprint"`
@@ -119,7 +123,12 @@ type EdgeRoute struct {
 	Balance           string   `yaml:"balance"`
 	AllowSharedCert   bool     `yaml:"allow_shared_cert"`
 	MaxConnections    int      `yaml:"max_connections"`
+	HTTP3             *bool    `yaml:"http3"`
 }
+
+// ServesHTTP3 reports whether the route's hosts may be served over HTTP/3
+// (the default) when the ingress serves it.
+func (r EdgeRoute) ServesHTTP3() bool { return r.HTTP3 == nil || *r.HTTP3 }
 
 // Balancing algorithms for EdgeRoute.Balance.
 const (

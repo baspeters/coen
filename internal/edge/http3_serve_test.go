@@ -3,6 +3,7 @@ package edge
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log/slog"
@@ -569,5 +570,78 @@ func TestServeHTTP3WebSocketStuckClient(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("the handler hung on a client that stopped reading")
+	}
+}
+
+// A route kept off HTTP/3 answers 421 on HTTP/3, WebSocket upgrades too,
+// and its handshake is refused by server name; other names, and none, are
+// not, and the TCP ingress clears Alt-Svc for it while HTTP/3 is up.
+func TestHTTP3RouteOptOutAtTheEdge(t *testing.T) {
+	st := obs.NewState("edge")
+	e, rs := h3Edge(st)
+	rs.noHTTP3 = true
+	rec := httptest.NewRecorder()
+	e.serveHTTP3(rec, h3Request("GET", "app.test", nil))
+	if rec.Code != http.StatusMisdirectedRequest {
+		t.Fatalf("status %d, want 421", rec.Code)
+	}
+	ws := h3Request("CONNECT", "app.test", nil)
+	ws.Proto, ws.Host = "websocket", "app.test" // as quic-go presents an extended CONNECT
+	rec = httptest.NewRecorder()
+	e.serveHTTP3(rec, ws)
+	if rec.Code != http.StatusMisdirectedRequest {
+		t.Fatalf("WebSocket: status %d, want 421", rec.Code)
+	}
+
+	for name, refused := range map[string]bool{"app.test": true, "APP.test.": true, "other.test": false, "": false} {
+		conf, err := e.refuseNoHTTP3(&tls.ClientHelloInfo{ServerName: name})
+		if conf != nil || (err != nil) != refused {
+			t.Errorf("server name %q: config %v, error %v, want refused=%v", name, conf, err, refused)
+		}
+	}
+	// The two 421s are counted on the route; refused handshakes are not
+	// requests, and are not.
+	if n := st.Detail().Routes[0].Failures.Get(obs.ReasonHTTP3Off); n != 2 {
+		t.Fatalf("http3_off counted %d times, want 2", n)
+	}
+	bad := h3Request("GET", "app.test", nil)
+	bad.Header.Set("X-Bad", "a\nb")
+	rec = httptest.NewRecorder()
+	e.serveHTTP3(rec, bad)
+	if rec.Code != 400 {
+		t.Fatalf("a malformed request for a host off HTTP/3: %d, want 400", rec.Code)
+	}
+
+	// A handshake without a server name (an IP address) is matched against
+	// the default route.
+	def := &routeState{noHTTP3: true}
+	e.routes = route.Build([]route.Entry[*routeState]{{Pattern: "app.test", Value: &routeState{}}, {Pattern: "*", Value: def}})
+	if _, err := e.refuseNoHTTP3(&tls.ClientHelloInfo{}); err == nil {
+		t.Fatal("no server name, default route off HTTP/3: not refused")
+	}
+	if _, err := e.refuseNoHTTP3(&tls.ClientHelloInfo{ServerName: "app.test"}); err != nil {
+		t.Fatalf("a host on HTTP/3 refused: %v", err)
+	}
+
+	if got := e.altSvcFor(rs); got != "" {
+		t.Fatalf("route off HTTP/3, HTTP/3 not configured: Alt-Svc %q, want none", got)
+	}
+	e.cfg.Ingress.HTTP3.Enabled = true
+	if got := e.altSvcFor(rs); got != "clear" {
+		t.Fatalf("route off HTTP/3, HTTP/3 configured but not up: Alt-Svc %q, want clear", got)
+	}
+	if got := e.altSvcFor(&routeState{}); got != "" {
+		t.Fatalf("other routes, HTTP/3 not up: Alt-Svc %q", got)
+	}
+	e.altSvc.Store("") // alt_svc: off
+	if got := e.altSvcFor(rs); got != "clear" {
+		t.Fatalf("route off HTTP/3, alt_svc off: Alt-Svc %q, want clear", got)
+	}
+	if got := e.altSvcFor(&routeState{}); got != "" {
+		t.Fatalf("other routes, alt_svc off: Alt-Svc %q", got)
+	}
+	e.altSvc.Store(`h3=":443"`)
+	if got := e.altSvcFor(&routeState{}); got != `h3=":443"` {
+		t.Fatalf("other routes: Alt-Svc %q", got)
 	}
 }

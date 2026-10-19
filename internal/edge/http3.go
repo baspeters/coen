@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -60,7 +61,11 @@ func (e *Edge) newHTTP3(cert tls.Certificate, pc net.PacketConn) (*http3.Server,
 	if idle <= 0 {
 		idle = defaultHTTP3Idle
 	}
-	tlsConf := http3.ConfigureTLSConfig(&tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13})
+	tlsConf := http3.ConfigureTLSConfig(&tls.Config{
+		Certificates:       []tls.Certificate{cert},
+		MinVersion:         tls.VersionTLS13,
+		GetConfigForClient: e.refuseNoHTTP3,
+	})
 	tr := &quic.Transport{Conn: pc, StatelessResetKey: resetKey(cert)}
 	ln, err := tr.Listen(tlsConf, &quic.Config{
 		HandshakeIdleTimeout: readHeaderDeadline(e.cfg.Ingress.ReadHeaderTimeout.Duration()),
@@ -81,6 +86,32 @@ func (e *Edge) newHTTP3(cert tls.Certificate, pc net.PacketConn) (*http3.Server,
 		},
 	}
 	return srv, tr, &cappedListener{Listener: ln, e: e}, nil
+}
+
+// errNoHTTP3 refuses a QUIC handshake for a host kept off HTTP/3.
+var errNoHTTP3 = errors.New("host not served over HTTP/3")
+
+// refuseNoHTTP3 fails the QUIC handshake for a server name whose route is
+// kept off HTTP/3 (routes[].http3: false), so the client falls back to TCP
+// before sending a request. A handshake without a server name (a client
+// that dialled an IP address) is matched as one, against the default route.
+// Other names get the default config; a request on their connections for a
+// host kept off HTTP/3 gets 421 (see serveHTTP3).
+func (e *Edge) refuseNoHTTP3(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+	rs, ok := e.routes.Match(hello.ServerName) // Match normalizes it
+	if !ok || !rs.noHTTP3 {
+		return nil, nil
+	}
+	// Not counted: a ClientHello is not a request, and its source address is
+	// not yet validated, so anyone could drive a counter up with it.
+	if e.log.Enabled(context.Background(), slog.LevelDebug) {
+		addr := ""
+		if hello.Conn != nil {
+			addr = hello.Conn.RemoteAddr().String()
+		}
+		e.log.Debug("ingress.http3_handshake_refused", "server_name", hello.ServerName, "client_addr", addr)
+	}
+	return nil, errNoHTTP3
 }
 
 // resetKey derives the QUIC stateless reset key from the ingress
@@ -256,6 +287,16 @@ func (e *Edge) serveHTTP3(w http.ResponseWriter, r *http.Request) {
 		e.state.Failure(obs.ReasonNoRoute)
 		log.Warn("ingress.no_route")
 		fail(404, "Not Found", "No route for host")
+		return
+	}
+	if rs.noHTTP3 {
+		// The connection was made for another host (a browser may reuse one
+		// for every host its certificate covers). 421 tells the client to
+		// retry on a new connection, whose handshake is refused (see
+		// refuseNoHTTP3), so it falls back to TCP.
+		rs.stats.Failure(obs.ReasonHTTP3Off)
+		log.Debug("ingress.http3_misdirected")
+		fail(421, "Misdirected Request", "Not served over HTTP/3")
 		return
 	}
 	trailers := trailerNames(r.Trailer)

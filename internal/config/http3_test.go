@@ -78,3 +78,34 @@ func TestAltSvcHeaderFor(t *testing.T) {
 		t.Fatalf("a literal value is sent as given: %q", got)
 	}
 }
+
+func TestRouteServesHTTP3(t *testing.T) {
+	on, off := true, false
+	for _, tc := range []struct {
+		v    *bool
+		want bool
+	}{{nil, true}, {&on, true}, {&off, false}} {
+		if got := (EdgeRoute{HTTP3: tc.v}).ServesHTTP3(); got != tc.want {
+			t.Errorf("http3 %v: ServesHTTP3 = %v", tc.v, got)
+		}
+	}
+}
+
+func TestRouteHTTP3OffValidation(t *testing.T) {
+	off := false
+	c := standaloneEdge()
+	c.Routes[0].HTTP3 = &off
+	if err := c.Validate(); err != nil {
+		t.Fatalf("standalone, HTTP/3 off: %v", err)
+	}
+	c.Ingress.HTTP3.Enabled = true
+	if err := c.Validate(); err != nil {
+		t.Fatalf("standalone, HTTP/3 on: %v", err)
+	}
+	p := validEdgeConfig()
+	p.Ingress.Mode = "proxied"
+	p.Routes[0].HTTP3 = &off
+	if err := p.Validate(); err == nil || !strings.Contains(err.Error(), "no effect in proxied mode") {
+		t.Fatalf("proxied: %v", err)
+	}
+}

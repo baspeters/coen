@@ -12,20 +12,22 @@ import (
 // first final response on a connection is touched: a browser remembers
 // Alt-Svc for the origin, and later ones pass through untouched. Interim
 // (1xx) responses before it pass unchanged. The head is left as it is when it
-// is a protocol-switching (101) response, already carries Alt-Svc, uses bare
-// LF line endings, or cannot be read as a response head within
+// is a protocol-switching (101) response, already carries Alt-Svc (unless
+// replace is set: then the service's Alt-Svc lines give way to value), uses
+// bare LF line endings, or cannot be read as a response head within
 // maxHeaderBytes; in each case the bytes go to the client unchanged.
 type altSvcConn struct {
 	net.Conn
 	value   string
+	replace bool
 	pending []byte // bytes ready for the client (a head, possibly edited)
 	rest    []byte // bytes read past the heads dealt with so far
 	done    bool   // the first final head has been dealt with
 	tmp     []byte // read buffer while collecting heads
 }
 
-func newAltSvcConn(c net.Conn, value string) *altSvcConn {
-	return &altSvcConn{Conn: c, value: value}
+func newAltSvcConn(c net.Conn, value string, replace bool) *altSvcConn {
+	return &altSvcConn{Conn: c, value: value, replace: replace}
 }
 
 func (a *altSvcConn) Read(b []byte) (int, error) {
@@ -59,7 +61,7 @@ func (a *altSvcConn) Read(b []byte) (int, error) {
 				a.pending, a.rest = buf[:next], buf[next:] // and keep looking
 			default:
 				a.done = true
-				a.pending = withAltSvc(buf, end, a.value)
+				a.pending = withAltSvc(buf, end, a.value, a.replace)
 			}
 			if a.done {
 				a.tmp = nil // not needed past the first head
@@ -137,25 +139,49 @@ func hasBareLF(b []byte) bool {
 }
 
 // withAltSvc returns buf (a response head ending at end, then any body
-// bytes) with an Alt-Svc line added to the head when it is due one.
-func withAltSvc(buf []byte, end int, value string) []byte {
+// bytes) with an Alt-Svc line added to the head when it is due one. With
+// replace, Alt-Svc lines the service set are dropped first; without it, a
+// head that has one is left alone.
+func withAltSvc(buf []byte, end int, value string, replace bool) []byte {
 	head := buf[:end]
 	if code, ok := statusCode(head); !ok || code[0] == '1' {
 		return buf // not a response line, or an interim / switching response
 	}
-	_, fields, _ := bytes.Cut(head, []byte("\r\n"))
+	status, fields, _ := bytes.Cut(head, []byte("\r\n"))
+	out := make([]byte, 0, len(buf)+len(value)+11)
+	out = append(out, status...)
+	dropping := false // inside a dropped field, which may continue on folded lines
 	for len(fields) > 0 {
 		var l []byte
 		l, fields, _ = bytes.Cut(fields, []byte("\r\n"))
-		if name, _, ok := bytes.Cut(l, []byte(":")); ok && bytes.EqualFold(bytes.TrimSpace(name), []byte("alt-svc")) {
-			return buf // the service set its own
+		if folded(l) && dropping {
+			continue
 		}
+		if dropping = isAltSvcField(l); dropping {
+			if !replace {
+				return buf // the service set its own
+			}
+			continue
+		}
+		out = append(out, "\r\n"...)
+		out = append(out, l...)
 	}
-	out := make([]byte, 0, len(buf)+len(value)+11)
-	out = append(out, head...)
 	out = append(out, "\r\nAlt-Svc: "...)
 	out = append(out, value...)
 	return append(out, buf[end:]...)
+}
+
+// folded reports a header line that continues the previous field (obsolete
+// line folding).
+func folded(l []byte) bool { return len(l) > 0 && (l[0] == ' ' || l[0] == '\t') }
+
+// isAltSvcField reports a header line that starts an Alt-Svc field.
+func isAltSvcField(l []byte) bool {
+	if folded(l) {
+		return false
+	}
+	name, _, ok := bytes.Cut(l, []byte(":"))
+	return ok && bytes.EqualFold(bytes.TrimSpace(name), []byte("alt-svc"))
 }
 
 var _ io.Reader = (*altSvcConn)(nil)

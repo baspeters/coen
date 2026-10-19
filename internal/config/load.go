@@ -116,6 +116,10 @@ func (c *EdgeConfig) Validate() error {
 		if err := r.validateAgents(); err != nil {
 			return fmt.Errorf("route %q: %w", r.Host, err)
 		}
+		if !r.ServesHTTP3() && c.Ingress.Mode == "proxied" {
+			// The edge cannot keep a host off HTTP/3 that it does not serve.
+			return fmt.Errorf("route %q: http3: false has no effect in proxied mode; leave the host out of the proxy's HTTP/3 instead", r.Host)
+		}
 		for _, fp := range r.Fingerprints() {
 			if r.AllowSharedCert {
 				sharedBy[fp] = r.Host

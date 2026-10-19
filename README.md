@@ -389,8 +389,8 @@ ingress:
   goes as `Transfer-Encoding: chunked`.
 - **How clients find it.** Browsers first connect over TCP; the edge adds
   `Alt-Svc: h3=":443"; ma=86400` to the first response on each connection, unless the service
-  sets its own `Alt-Svc`. `alt_svc: off` leaves responses alone, and any other value is sent
-  as given. A DNS `HTTPS` record lets a browser use HTTP/3 from the first request:
+  sets its own `Alt-Svc`. `alt_svc: off` leaves responses alone (except on hosts kept off
+  HTTP/3, below), and any other value is sent as given. A DNS `HTTPS` record lets a browser use HTTP/3 from the first request:
   `app.example.com. 300 IN HTTPS 1 . alpn="h3"`.
 - **Limits.** `ingress.max_connections` counts each QUIC connection as one, like a TCP
   connection, and a connection carries at most 32 requests at once (the client queues the
@@ -406,6 +406,27 @@ ingress:
   `CONNECT`); the edge turns it into the usual HTTP/1.1 `Upgrade` towards the agent, so the
   service sees an ordinary WebSocket handshake. Other `CONNECT` requests get `501`. 0-RTT is
   off, so a request can never be replayed.
+- **Keeping a host off HTTP/3.** Windows sign-in (NTLM, Negotiate/Kerberos) authenticates the
+  TCP connection, which HTTP/3 (like HTTP/2) cannot carry; over TCP it works, since each client
+  connection reaches the service as one connection. `http3: false` on a route keeps its hosts
+  on TCP:
+  - The first TCP response on each connection gets `Alt-Svc: clear` in place of any `Alt-Svc`
+    the service sets, whatever `alt_svc` says, so a browser forgets HTTP/3 for the host.
+    Later responses on the connection, and a head the edge cannot read (bare LF line endings,
+    or over its size limit), pass unchanged, so a service should not advertise HTTP/3 itself
+    (behind coen it cannot serve it anyway); if it does, a browser only spends a refused
+    handshake before using TCP again.
+  - An HTTP/3 handshake for the host is refused, so the browser falls back to TCP. A
+    handshake without a server name (a client that dialled an IP address) is judged by the
+    default `*` route.
+  - A request for the host on an HTTP/3 connection made for another host (browsers reuse one
+    for every host its certificate covers) gets `421 Misdirected Request`, which tells the
+    browser to retry on a new connection.
+
+  Requests answered `421` count as `coen_ingress_rejected_total{reason="http3_off"}`; refused
+  handshakes are only logged (at `debug`), since they come before any request. Leave such hosts
+  out of DNS `HTTPS` records. The setting needs `standalone` mode; behind nginx, keep the host
+  out of nginx's HTTP/3 instead.
 - **Behind nginx (proxied mode)**, let nginx serve HTTP/3 instead: nginx 1.25 or newer with
   `listen 443 quic reuseport;`, `http3 on;` and `add_header Alt-Svc 'h3=":443"; ma=86400';` in
   the vhost. nginx forwards to the edge over plain HTTP as before, so the edge needs no
@@ -544,6 +565,7 @@ routes:                     # host -> owning agent(s) (by client-cert fingerprin
     agent_fingerprints: ["SHA256:...", "SHA256:..."]
     balance: least_conn     # least_conn (default) or round_robin
     allow_shared_cert: false # true: several agents may run with one certificate
+    http3: true             # false: keep this host off HTTP/3 (see HTTP/3 for clients)
 drain_timeout: 15s          # finish in-flight streams up to this long on shutdown
 log:
   level: info               # trace, debug, info, warn, or error
@@ -564,7 +586,7 @@ metrics:                    # optional; unset disables the endpoint
 | `ingress.idle_timeout` | duration | `0` | Rolling idle deadline while streaming: a connection with no bytes in either direction for this long is closed. `0` disables it. See the WebSocket note below. For HTTP/3 it also closes a connection with no request in progress (`30s` when unset), and a request with no response for this long gets a `504`. |
 | `ingress.http3.enabled` | bool | `false` | Serve HTTP/3 (QUIC over UDP) as well; `standalone` mode only. See [HTTP/3 for clients](#http3-for-clients). |
 | `ingress.http3.listen` | string | `ingress.listen` | UDP address for HTTP/3. |
-| `ingress.http3.alt_svc` | string | `auto` | `Alt-Svc` added to the first response on each TCP connection: `auto` advertises the HTTP/3 port, `off` adds nothing, any other value is sent as given. |
+| `ingress.http3.alt_svc` | string | `auto` | `Alt-Svc` added to the first response on each TCP connection: `auto` advertises the HTTP/3 port, `off` adds nothing, any other value is sent as given. Routes with `http3: false` get `Alt-Svc: clear` regardless. |
 | `tunnel.listen` | string | required | Address of the mTLS tunnel server the agents dial, e.g. `:2636`. |
 | `tunnel.ca` | path | required | CA bundle that an agent's client certificate must chain to. |
 | `tunnel.cert`, `tunnel.key` | path | required | The edge's server certificate and key for the tunnel. |
@@ -575,6 +597,7 @@ metrics:                    # optional; unset disables the endpoint
 | `routes[].balance` | string | `least_conn` | How connections are spread across the route's live agent sessions: `least_conn` (fewest open streams) or `round_robin`. |
 | `routes[].allow_shared_cert` | bool | `false` | Let several agents run with the same certificate, each as its own session. Must be set the same way on every route that names that fingerprint. |
 | `routes[].max_connections` | int | `0` | Per-route cap on concurrent connections; over it the edge returns `503`. `0` means unlimited. |
+| `routes[].http3` | bool | `true` | `false` keeps the route's hosts off HTTP/3, for services with connection-based auth; see [HTTP/3 for clients](#http3-for-clients). `standalone` mode only. |
 | `drain_timeout` | duration | `15s` | On shutdown, finish in-flight streams for up to this long before force-closing. `0` or unset uses the default (15s). |
 | `log.level` | string | `info` | `trace`, `debug`, `info`, `warn`, or `error`. |
 | `log.format` | string | autodetect | `text`, `json`, or `journal`. Unset autodetects: `journal` under systemd (journald), otherwise `text`. See [Log formats](#log-formats). |
@@ -863,7 +886,7 @@ starts at `0`, so `rate()` works from the first scrape.
 | `coen_agent_sessions` | gauge | edge | `fingerprint` | Sessions taking new traffic for that fingerprint (draining ones excluded); above `1` only with `allow_shared_cert`. |
 | `coen_agent_streams_active` | gauge | edge | `fingerprint` | Streams open or being set up right now on that agent's sessions, including draining ones: the load `least_conn` balances on. A stalled agent shows its stream attempts here until they time out. |
 | `coen_agent_streams_total` | counter | edge | `fingerprint` | Streams opened on that agent since start, which shows how load is balanced. |
-| `coen_ingress_rejected_total` | counter | edge | `reason`, `route` | Requests the edge answered itself. Without a route: `max_connections` (503; the cap is checked before anything is read, so this counts every connection turned away, probes included), `bad_request` (400), `no_route` (404). With a route: `route_max_connections` (503), `no_agent` (502), `stream_error` (502), `response_timeout` (504: an HTTP/3 request with no response within `ingress.idle_timeout`), `bad_response` (502: an HTTP/3 request whose service sent a response the edge cannot relay, such as a malformed head or a WebSocket upgrade it ignored). A connection that sends no request at all, such as a TCP health check or a browser preconnect, is not a rejected request and is not counted here. A TLS handshake abandoned partway is a `bad_request`. |
+| `coen_ingress_rejected_total` | counter | edge | `reason`, `route` | Requests the edge answered itself. Without a route: `max_connections` (503; the cap is checked before anything is read, so this counts every connection turned away, probes included), `bad_request` (400), `no_route` (404). With a route: `route_max_connections` (503), `no_agent` (502), `stream_error` (502), `response_timeout` (504: an HTTP/3 request with no response within `ingress.idle_timeout`), `bad_response` (502: an HTTP/3 request whose service sent a response the edge cannot relay, such as a malformed head or a WebSocket upgrade it ignored), `http3_off` (421: an HTTP/3 request for a route with `http3: false`, on a connection made for another host). A connection that sends no request at all, such as a TCP health check or a browser preconnect, is not a rejected request and is not counted here. A TLS handshake abandoned partway is a `bad_request`. |
 | `coen_ingress_header_timeouts_total` | counter | edge | | Connections closed at `read_header_timeout` without sending any request byte, such as idle browser preconnects. A sudden rise suggests an idle-connection flood. |
 | `coen_tunnel_up` | gauge | agent | | `1` while the tunnel to the edge is established. |
 | `coen_tunnel_reconnects_total` | counter | agent | | Reconnect attempts. |

@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -122,6 +123,9 @@ func echoBackend(t *testing.T) string {
 	return ln.Addr().String()
 }
 
+// noH3Host is a route in every h3Stack kept off HTTP/3 (routes[].http3: false).
+const noH3Host = "legacy.test"
+
 func buildH3Stack(t *testing.T) *h3Stack { return buildH3StackWith(t, 0, 0) }
 
 // buildH3StackCapped is buildH3Stack with ingress.max_connections set.
@@ -150,6 +154,7 @@ func buildH3StackWith(t *testing.T, maxConns int, readHeader time.Duration) *h3S
 	if err != nil {
 		t.Fatal(err)
 	}
+	off := false
 	st := &h3Stack{udpAddr: pc.LocalAddr().String(), roots: pool, edge: obs.NewState("edge"), agent: obs.NewState("agent"), udp: pc}
 	edgeLog, _, _ := obs.NewLogger("error", "text", io.Discard)
 	e, err := edge.New(&config.EdgeConfig{
@@ -163,6 +168,7 @@ func buildH3StackWith(t *testing.T, maxConns int, readHeader time.Duration) *h3S
 		Tunnel: config.TunnelServerConfig{CA: caPath, Cert: edgeCertPath, Key: edgeKeyPath},
 		Routes: []config.EdgeRoute{
 			{Host: "*", AgentFingerprint: fingerprintOf(t, acPEM)},
+			{Host: noH3Host, AgentFingerprint: fingerprintOf(t, acPEM), HTTP3: &off},
 		},
 		Drain: config.Duration(2 * time.Second),
 	}, edgeLog, st.edge)
@@ -633,5 +639,54 @@ func TestHTTP3ShutdownKeepsToTheDrainBudget(t *testing.T) {
 	st.stop()
 	if d := time.Since(start); d > 4*time.Second {
 		t.Fatalf("shutdown took %v, past the 2s drain budget", d)
+	}
+}
+
+// A route kept off HTTP/3: its handshake is refused, a request for it on a
+// connection made for another host gets 421, and its TCP responses clear
+// any HTTP/3 alternative a browser learned before. Other hosts are unaffected.
+func TestHTTP3RouteOptOut(t *testing.T) {
+	st := buildH3Stack(t)
+
+	tr := &http3.Transport{TLSClientConfig: &tls.Config{RootCAs: st.roots, ServerName: noH3Host}}
+	t.Cleanup(func() { _ = tr.Close() })
+	_, err := (&http.Client{Transport: tr, Timeout: 5 * time.Second}).Get("https://" + st.udpAddr + "/")
+	var te *quic.TransportError
+	if !errors.As(err, &te) || !te.Remote || !te.ErrorCode.IsCryptoError() {
+		t.Fatalf("handshake for %s: %v, want the edge to refuse it (a TLS error)", noH3Host, err)
+	}
+
+	c := st.h3Client(t) // made for 127.0.0.1, which serves HTTP/3
+	req, _ := http.NewRequest(http.MethodGet, st.url("/"), nil)
+	req.Host = noH3Host
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = readAll(t, resp)
+	if resp.StatusCode != http.StatusMisdirectedRequest {
+		t.Fatalf("%s over a coalesced connection: status %d, want 421", noH3Host, resp.StatusCode)
+	}
+	resp, err = c.Get(st.url("/"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _ = readAll(t, resp); resp.StatusCode != 200 {
+		t.Fatalf("another host on the same connection: status %d", resp.StatusCode)
+	}
+
+	tc, err := tls.Dial("tcp", st.tcpAddr, &tls.Config{RootCAs: st.roots, ServerName: "127.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tc.Close()
+	fmt.Fprintf(tc, "GET / HTTP/1.1\r\nHost: %s\r\n\r\n", noH3Host)
+	tresp, err := http.ReadResponse(bufio.NewReader(tc), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = tresp.Body.Close()
+	if tresp.StatusCode != 200 || tresp.Header.Get("Alt-Svc") != "clear" {
+		t.Fatalf("TCP for %s: status %d, Alt-Svc %q, want 200 and clear", noH3Host, tresp.StatusCode, tresp.Header.Get("Alt-Svc"))
 	}
 }

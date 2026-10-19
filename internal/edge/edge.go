@@ -38,6 +38,7 @@ type routeState struct {
 	pickMu       *sync.Mutex // the edge's pick lock (see pickReserve); nil in tests
 	sem          *semaphore
 	stats        *obs.RouteStats
+	noHTTP3      bool // routes[].http3: false: kept off HTTP/3 (see altSvcFor, refuseNoHTTP3)
 }
 
 // pick chooses a session among cands, skipping those already tried for this
@@ -168,7 +169,7 @@ func New(cfg *config.EdgeConfig, log *slog.Logger, state *obs.State) (*Edge, err
 	entries := make([]route.Entry[*routeState], 0, len(cfg.Routes))
 	for _, r := range cfg.Routes {
 		fps := r.Fingerprints()
-		rs := &routeState{fingerprints: fps, label: strings.Join(fps, ","), balance: r.BalanceMode(), pickMu: &e.pickMu, sem: newSemaphore(r.MaxConnections), stats: state.Route(route.Normalize(r.Host))}
+		rs := &routeState{fingerprints: fps, label: strings.Join(fps, ","), balance: r.BalanceMode(), pickMu: &e.pickMu, sem: newSemaphore(r.MaxConnections), stats: state.Route(route.Normalize(r.Host)), noHTTP3: !r.ServesHTTP3()}
 		entries = append(entries, route.Entry[*routeState]{Pattern: r.Host, Value: rs})
 	}
 	e.routes = route.Build(entries)
@@ -866,8 +867,10 @@ func (e *Edge) handleIngress(conn net.Conn) {
 	// tunnel traffic).
 	counted := &countingConn{Conn: stream, in: sb.AddIn, out: sb.AddOut}
 	var tunnelSide net.Conn = counted
-	if v, _ := e.altSvc.Load().(string); v != "" {
-		tunnelSide = newAltSvcConn(tunnelSide, v) // advertise HTTP/3
+	if v := e.altSvcFor(rs); v != "" {
+		// Advertise HTTP/3, or, on a route kept off it, withdraw it, in place
+		// of any Alt-Svc the service sets on the first response.
+		tunnelSide = newAltSvcConn(tunnelSide, v, rs.noHTTP3)
 	}
 	client := proxy.NewIdleConn(conn, e.cfg.Ingress.IdleTimeout.Duration())
 	// The head goes to the agent first: through the pipe, or already sent
@@ -886,6 +889,20 @@ func (e *Edge) handleIngress(conn net.Conn) {
 	// Both copies have ended, so the totals are settled: tunnel bytes, as
 	// the metrics count them.
 	log.Debug("stream.closed", "bytes_in", counted.inTotal+preSent, "bytes_out", counted.outTotal)
+}
+
+// altSvcFor returns the Alt-Svc value for TCP responses on rs. With HTTP/3
+// configured, a route kept off it gets "clear", whatever alt_svc says and
+// even if HTTP/3 has failed, so a browser drops an HTTP/3 alternative it
+// learned before (under an earlier config, or from the service itself).
+// Other routes get the configured value while HTTP/3 is served. "" adds
+// nothing.
+func (e *Edge) altSvcFor(rs *routeState) string {
+	if rs.noHTTP3 && e.cfg.Ingress.HTTP3.Enabled {
+		return "clear"
+	}
+	v, _ := e.altSvc.Load().(string)
+	return v
 }
 
 // refusal is how a request that could not be handed to an agent is answered.

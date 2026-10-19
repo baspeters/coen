@@ -17,3 +17,6 @@ tunnel:
 routes:
   - host: app.example.com
     agent_fingerprint: "REPLACE_WITH_AGENT_FINGERPRINT"
+  - host: intranet.example.com  # signs users in with Windows (NTLM/Negotiate) auth
+    agent_fingerprint: "REPLACE_WITH_AGENT_FINGERPRINT"
+    http3: false            # keep it on TCP: HTTP/3 cannot carry connection-based auth

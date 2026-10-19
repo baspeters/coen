@@ -21,6 +21,7 @@ const (
 	ReasonDialError                         // agent: backend unreachable
 	ReasonResponseTimeout                   // edge: no response within idle_timeout (HTTP/3)
 	ReasonBadResponse                       // edge: the service's response could not be relayed (HTTP/3)
+	ReasonHTTP3Off                          // edge: HTTP/3 for a route kept off it (routes[].http3: false)
 	numReasons
 )
 
@@ -35,6 +36,7 @@ var reasonNames = [numReasons]string{
 	ReasonDialError:           "dial_error",
 	ReasonResponseTimeout:     "response_timeout",
 	ReasonBadResponse:         "bad_response",
+	ReasonHTTP3Off:            "http3_off",
 }
 
 // String returns the reason's metric label value.
@@ -50,7 +52,7 @@ func (r Reason) String() string {
 // and any other reason once it is non-zero.
 var (
 	EdgeUnroutedReasons  = []Reason{ReasonMaxConnections, ReasonBadRequest, ReasonNoRoute}
-	EdgeRouteReasons     = []Reason{ReasonRouteMaxConnections, ReasonNoAgent, ReasonStreamError, ReasonResponseTimeout, ReasonBadResponse}
+	EdgeRouteReasons     = []Reason{ReasonRouteMaxConnections, ReasonNoAgent, ReasonStreamError, ReasonResponseTimeout, ReasonBadResponse, ReasonHTTP3Off}
 	AgentUnroutedReasons = []Reason{ReasonPreambleError, ReasonNoRoute}
 	AgentRouteReasons    = []Reason{ReasonDialError}
 )
