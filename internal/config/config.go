@@ -177,12 +177,35 @@ type EdgeConfig struct {
 	Tunnel  TunnelServerConfig `yaml:"tunnel"`
 	Routes  []EdgeRoute        `yaml:"routes"`
 	Drain   Duration           `yaml:"drain_timeout"`
-	Log     LogConfig          `yaml:"log"`
-	Admin   AdminConfig        `yaml:"admin"`
-	Metrics MetricsConfig      `yaml:"metrics"`
+	// AgentWait is how long a request waits for an agent when its route has
+	// none live (one restarting, say) before it gets a 502; nil means
+	// DefaultAgentWait, 0 turns waiting off.
+	AgentWait *Duration     `yaml:"agent_wait"`
+	Log       LogConfig     `yaml:"log"`
+	Admin     AdminConfig   `yaml:"admin"`
+	Metrics   MetricsConfig `yaml:"metrics"`
 	// Version is the build version, set programmatically (not from YAML). The
 	// edge stamps it into each stream preamble for agent-side skew detection.
 	Version string `yaml:"-"`
+}
+
+// DefaultAgentWait is agent_wait when unset: long enough for an agent to
+// restart or reconnect, short enough that a client does not give up first.
+const DefaultAgentWait = 5 * time.Second
+
+// NewDuration returns a pointer to d, for optional duration settings such as
+// AgentWait.
+func NewDuration(d time.Duration) *Duration {
+	v := Duration(d)
+	return &v
+}
+
+// AgentWaitDuration returns agent_wait, or DefaultAgentWait when unset.
+func (c *EdgeConfig) AgentWaitDuration() time.Duration {
+	if c.AgentWait == nil {
+		return DefaultAgentWait
+	}
+	return c.AgentWait.Duration()
 }
 
 // AllowedFingerprints derives the set of agent fingerprints permitted to connect

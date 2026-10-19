@@ -413,7 +413,7 @@ func (e *Edge) openH3Stream(r *http.Request, rs *routeState, connID, host string
 		fail(503, "Service Unavailable", "Too many connections")
 		return nil
 	}
-	stream, chosen, refused := e.dispatch(rs, connID, r.RemoteAddr, host, head, log)
+	stream, chosen, refused := e.dispatch(r.Context(), rs, connID, r.RemoteAddr, host, head, log)
 	if refused != nil {
 		rs.sem.release()
 		fail(refused.code, refused.reason, refused.detail)

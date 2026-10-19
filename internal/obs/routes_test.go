@@ -144,3 +144,8 @@ func TestStreamBytesShardsSum(t *testing.T) {
 	nb.AddIn(5) // must not panic
 	nb.AddOut(5)
 }
+
+func TestAgentWaitOnNilRoute(t *testing.T) {
+	var r *RouteStats
+	r.AgentWait() // a route built without stats counts nothing
+}

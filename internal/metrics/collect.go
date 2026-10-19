@@ -33,6 +33,7 @@ func Collect(d obs.Detail, version string) []Family {
 	active := Family{Name: "coen_streams_active", Help: "Streams currently open, by route.", Type: Gauge}
 	total := Family{Name: "coen_streams_total", Help: "Streams opened since start, by route.", Type: Counter}
 	h3 := Family{Name: "coen_streams_http3_total", Help: "Streams opened since start for HTTP/3 requests, by route (included in coen_streams_total). A stream carries one or more of a connection's requests in turn.", Type: Counter}
+	waits := Family{Name: "coen_ingress_agent_waits_total", Help: "Requests that found no agent to take them and waited for one (agent_wait), by route; those still without one when the wait ran out are also counted as no_agent in coen_ingress_rejected_total.", Type: Counter}
 	h3req := Family{Name: "coen_http3_requests_total", Help: "HTTP/3 requests sent to the service since start, by route, over the streams counted in coen_streams_http3_total.", Type: Counter}
 	bytes := Family{Name: "coen_stream_bytes_total", Help: "Bytes carried by streams as they flow, by route and direction (in: client to backend, out: backend to client).", Type: Counter}
 	for _, r := range d.Routes {
@@ -41,13 +42,14 @@ func Collect(d obs.Detail, version string) []Family {
 		total.Samples = append(total.Samples, Sample{Labels: []Label{rl}, Value: float64(r.Total)})
 		h3.Samples = append(h3.Samples, Sample{Labels: []Label{rl}, Value: float64(r.TotalH3)})
 		h3req.Samples = append(h3req.Samples, Sample{Labels: []Label{rl}, Value: float64(r.ReqH3)})
+		waits.Samples = append(waits.Samples, Sample{Labels: []Label{rl}, Value: float64(r.Waits)})
 		bytes.Samples = append(bytes.Samples,
 			Sample{Labels: []Label{{"direction", "in"}, rl}, Value: float64(r.BytesIn)},
 			Sample{Labels: []Label{{"direction", "out"}, rl}, Value: float64(r.BytesOut)})
 	}
 	fams = append(fams, active, total, bytes)
 	if role == "edge" {
-		fams = append(fams, h3, h3req)
+		fams = append(fams, h3, h3req, waits)
 	}
 
 	hs := Family{Name: "coen_tunnel_handshakes_total", Type: Counter,

@@ -40,6 +40,44 @@ type Agent struct {
 	draining    bool
 	inflight    sync.WaitGroup
 	versionWarn sync.Once
+
+	// onRetired, when set (see SetOnRetired), runs once on shutdown as soon
+	// as a replacement with the same certificate can take over; retiredDone
+	// records that the moment has come. Both guarded by mu.
+	onRetired   func()
+	retiredDone bool
+}
+
+// SetOnRetired sets f to run once during shutdown, as soon as a replacement
+// with the same certificate can connect without being refused as a
+// duplicate: once the edge has acknowledged the drain request, at once when
+// there is no session or no drain time, and, with an edge that has no drain
+// support (older than v0.4.0), only after this agent's session has closed.
+// It reports false, and does not set f, when that moment has already passed
+// (the shutdown began before it was called).
+func (a *Agent) SetOnRetired(f func()) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.retiredDone {
+		return false
+	}
+	a.onRetired = f
+	return true
+}
+
+// retired runs the onRetired callback, once.
+func (a *Agent) retired() {
+	a.mu.Lock()
+	if a.retiredDone {
+		a.mu.Unlock()
+		return
+	}
+	a.retiredDone = true
+	f := a.onRetired
+	a.mu.Unlock()
+	if f != nil {
+		f()
+	}
 }
 
 // drainStreamsFor stops accepting new streams, then waits up to d for
@@ -76,6 +114,9 @@ func New(cfg *config.AgentConfig, log *slog.Logger, state *obs.State) (*Agent, e
 }
 
 func (a *Agent) Run(ctx context.Context) error {
+	// Shutting down without a session (between reconnects) has nothing to
+	// hand off: the callback runs as Run returns, if it has not already.
+	defer a.retired()
 	min := a.cfg.Reconnect.MinBackoff.Duration()
 	max := a.cfg.Reconnect.MaxBackoff.Duration()
 	backoff := min
@@ -210,14 +251,20 @@ func (a *Agent) shutdownSession(ctx context.Context, session *yamux.Session, v2 
 	budget := a.cfg.Drain.Duration()
 	start := time.Now()
 	switch {
-	case !v2 || budget <= 0 || session.IsClosed():
-		// No handoff: an older edge, no draining at all, or a dead session.
+	case !v2:
+		// No handoff: an older edge, which refuses a replacement with this
+		// certificate as a duplicate for as long as this session is open.
+		defer a.retired() // after the drain, once the session is closed
+	case budget <= 0 || session.IsClosed():
+		// No handoff: no draining at all, or a dead session.
+		a.retired()
 	case budget < minHandoff:
 		// Neither is waited for, so the in-flight streams keep the whole
 		// budget; both end with the session at the latest.
 		a.refuseNew()
 		go tunnel.RequestDrain(session, budget)
 		go func() { _ = session.GoAway() }()
+		a.retired()
 	default:
 		// Send GoAway even if the drain acknowledgement does not come in
 		// time: this edge then retires the session the next time it picks
@@ -231,6 +278,7 @@ func (a *Agent) shutdownSession(ctx context.Context, session *yamux.Session, v2 
 			// elsewhere; those before it are already queued here.
 			a.log.Warn("drain.no_ack", "waited", ackWait.String())
 		}
+		a.retired() // the edge sends this agent nothing new now
 		// GoAway can block on a stalled tunnel; do not let it hold up the
 		// shutdown beyond a short bound, so at least a quarter of the budget
 		// is left for the in-flight streams.

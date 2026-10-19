@@ -115,6 +115,7 @@ func TestNewEdgeSetsSelfFingerprint(t *testing.T) {
 
 func TestEdgeReturns502WithoutAgent(t *testing.T) {
 	e, tunLn, ingressLn, _ := newTestEdge(t)
+	e.cfg.AgentWait = config.NewDuration(0) // the 502 itself; waiting is tested apart
 	defer tunLn.Close()
 	defer ingressLn.Close()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -970,7 +971,7 @@ func TestHandleIngressBrokenSessionReturns502(t *testing.T) {
 	_ = srv.Close() // the registered session is already closed, so OpenStream fails
 	_ = cli.Close()
 	e := &Edge{
-		cfg:    &config.EdgeConfig{},
+		cfg:    &config.EdgeConfig{AgentWait: config.NewDuration(0)}, // the 502, not the wait
 		log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 		state:  &obs.State{},
 		reg:    newRegistry(),

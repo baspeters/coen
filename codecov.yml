@@ -19,6 +19,8 @@ comment:
 # - cmd/coen: the two-line main() that only calls cli.Execute().
 # - internal/cli/run.go: the daemon launch and POSIX-signal wiring (blocking
 #   Run loops, SIGHUP/SIGTERM handling), exercised by the e2e and smoke tests.
+# - internal/netx/proxytest: a CONNECT proxy that only tests use.
 ignore:
   - "cmd/coen"
   - "internal/cli/run.go"
+  - "internal/netx/proxytest"

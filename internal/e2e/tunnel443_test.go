@@ -50,6 +50,15 @@ func freeAddr(t *testing.T) string {
 
 func buildSharedStack(t *testing.T, maxConns int, readHeader time.Duration) *sharedStack {
 	t.Helper()
+	// Requests while no agent is connected (the cap test's probes) answer
+	// at once.
+	return buildSharedStackWait(t, maxConns, readHeader, config.NewDuration(0))
+}
+
+// buildSharedStackWait is buildSharedStack with agent_wait set (nil: the
+// default).
+func buildSharedStackWait(t *testing.T, maxConns int, readHeader time.Duration, agentWait *config.Duration) *sharedStack {
+	t.Helper()
 	dir := t.TempDir()
 	ca, _ := pki.CreateCA()
 	caPath := writeFile(t, dir, "ca.crt", ca.CertPEM())
@@ -82,9 +91,10 @@ func buildSharedStack(t *testing.T, maxConns int, readHeader time.Duration) *sha
 			ReadHeaderTimeout: config.Duration(readHeader),
 			TLS:               config.TLSFiles{Cert: writeFile(t, dir, "public.crt", pcPEM), Key: writeFile(t, dir, "public.key", pkPEM)},
 		},
-		Tunnel: config.TunnelServerConfig{ShareIngress: true, CA: caPath, Cert: writeFile(t, dir, "edge.crt", ecPEM), Key: writeFile(t, dir, "edge.key", ekPEM)},
-		Routes: []config.EdgeRoute{{Host: "*", AgentFingerprint: fingerprintOf(t, acPEM)}},
-		Drain:  config.Duration(time.Second),
+		Tunnel:    config.TunnelServerConfig{ShareIngress: true, CA: caPath, Cert: writeFile(t, dir, "edge.crt", ecPEM), Key: writeFile(t, dir, "edge.key", ekPEM)},
+		Routes:    []config.EdgeRoute{{Host: "*", AgentFingerprint: fingerprintOf(t, acPEM)}},
+		Drain:     config.Duration(time.Second),
+		AgentWait: agentWait,
 	}, log, st.edge)
 	if err != nil {
 		t.Fatal(err)

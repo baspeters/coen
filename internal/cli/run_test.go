@@ -243,7 +243,7 @@ func TestServeDaemonServesMetrics(t *testing.T) {
 	ready, stop := make(chan struct{}), make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- serveDaemon(context.Background(), log, lv, obs.NewState("agent"), "", metricsBinding{ln: ln}, make(chan os.Signal), reload, fakeRunner{ready: ready, stop: stop})
+		done <- serveDaemon(context.Background(), log, lv, obs.NewState("agent"), "", metricsBinding{ln: ln}, make(chan os.Signal), reload, nil, fakeRunner{ready: ready, stop: stop})
 	}()
 	<-ready
 
@@ -328,7 +328,7 @@ func TestServeDaemonClaimsBusyMetricsPortLater(t *testing.T) {
 	ready, stop := make(chan struct{}), make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- serveDaemon(context.Background(), log, lv, obs.NewState("edge"), "", metricsBinding{retryAddr: addr}, make(chan os.Signal), func() (string, error) { return "info", nil }, fakeRunner{ready: ready, stop: stop})
+		done <- serveDaemon(context.Background(), log, lv, obs.NewState("edge"), "", metricsBinding{retryAddr: addr}, make(chan os.Signal), func() (string, error) { return "info", nil }, nil, fakeRunner{ready: ready, stop: stop})
 	}()
 	<-ready                            // the daemon runs although the metrics port is taken
 	time.Sleep(100 * time.Millisecond) // several retries while the predecessor drains
@@ -369,7 +369,7 @@ func TestServeDaemonStopsRetryingOnShutdown(t *testing.T) {
 	defer busy.Close()
 	done := make(chan error, 1)
 	go func() {
-		done <- serveDaemon(context.Background(), log, lv, obs.NewState("edge"), "", metricsBinding{retryAddr: busy.Addr().String()}, make(chan os.Signal), func() (string, error) { return "info", nil }, fakeRunner{})
+		done <- serveDaemon(context.Background(), log, lv, obs.NewState("edge"), "", metricsBinding{retryAddr: busy.Addr().String()}, make(chan os.Signal), func() (string, error) { return "info", nil }, nil, fakeRunner{})
 	}()
 	select {
 	case err := <-done:
@@ -426,7 +426,7 @@ func TestServeDaemonSideServersOutliveSignal(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- serveDaemon(ctx, log, lv, obs.NewState("edge"), sock, metricsBinding{ln: ln}, make(chan os.Signal), func() (string, error) { return "info", nil }, r)
+		done <- serveDaemon(ctx, log, lv, obs.NewState("edge"), sock, metricsBinding{ln: ln}, make(chan os.Signal), func() (string, error) { return "info", nil }, nil, r)
 	}()
 	<-r.ready
 	// Wait until both side servers are up before signalling shutdown.

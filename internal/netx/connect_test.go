@@ -183,3 +183,19 @@ func TestDialProxyTimeoutsAndFailures(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+// The test proxy answers anything but CONNECT with 405.
+func TestProxyRefusesOtherMethods(t *testing.T) {
+	p := proxytest.Start(t, proxytest.Options{})
+	c, err := net.Dial("tcp", p.URL.Host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_, _ = io.WriteString(c, "GET http://example/ HTTP/1.1\r\nHost: example\r\n\r\n")
+	b := make([]byte, 12)
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadFull(c, b); err != nil || string(b) != "HTTP/1.1 405" {
+		t.Fatalf("got %q %v", b, err)
+	}
+}

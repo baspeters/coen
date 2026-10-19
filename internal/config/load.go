@@ -97,6 +97,9 @@ func (c *EdgeConfig) Validate() error {
 			return fmt.Errorf("%s is required", name)
 		}
 	}
+	if c.AgentWait != nil && c.AgentWait.Duration() < 0 {
+		return fmt.Errorf("agent_wait must not be negative (0 turns waiting off)")
+	}
 	if c.Tunnel.ShareIngress && c.Ingress.Mode != "standalone" {
 		return fmt.Errorf("tunnel.share_ingress needs ingress.mode standalone: behind a reverse proxy the edge never sees the agents' TLS handshake")
 	}

@@ -106,3 +106,37 @@ func TestCheckAgentThroughProxy(t *testing.T) {
 		t.Fatalf("got %+v", r)
 	}
 }
+
+// One connection serves the reach check and the mTLS handshake; a handshake
+// that fails on it (an edge from another CA) is reported as such.
+func TestCheckAgentHandshakeFailsOnTheSameConnection(t *testing.T) {
+	cfg, _ := agentAndEdge(t)
+	other, _ := agentAndEdge(t) // another CA: this agent does not trust that edge
+	cfg.Edge.Address = other.Edge.Address
+	results := CheckAgent(cfg)
+	if r, _ := findResult(results, "net: tcp reach"); !r.OK {
+		t.Fatalf("reach: %+v", r)
+	}
+	if r, _ := findResult(results, "mtls: handshake"); r.OK || !strings.Contains(r.Hint, "verify the CA") {
+		t.Fatalf("mtls: %+v", r)
+	}
+}
+
+// The config checks on the agent's edge settings: a malformed pin, a pin
+// that does not match the edge, and an address without a port.
+func TestCheckAgentEdgeSettings(t *testing.T) {
+	cfg, _ := agentAndEdge(t)
+	cfg.Edge.EdgeFingerprint = "not-a-fingerprint"
+	if r, _ := findResult(CheckAgent(cfg), "config: edge_fingerprint"); r.OK {
+		t.Fatalf("a malformed pin: %+v", r)
+	}
+	cfg.Edge.EdgeFingerprint = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	if r, found := findResult(CheckAgent(cfg), "mtls: pin"); !found || r.OK {
+		t.Fatalf("a pin for another edge: %+v", r)
+	}
+	cfg.Edge.EdgeFingerprint = ""
+	cfg.Edge.Address = "edge.example.com"
+	if r, _ := findResult(CheckAgent(cfg), "dns: edge address"); r.OK || !strings.Contains(r.Hint, "host:port") {
+		t.Fatalf("no port: %+v", r)
+	}
+}

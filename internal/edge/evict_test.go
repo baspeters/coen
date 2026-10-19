@@ -20,7 +20,7 @@ import (
 func TestHandleIngressEvictsDeadSessionOnOpenStreamFailure(t *testing.T) {
 	srv, cli := newServerSession(t)
 	e := &Edge{
-		cfg:   &config.EdgeConfig{},
+		cfg:   &config.EdgeConfig{AgentWait: config.NewDuration(0)}, // the 502, not the wait
 		log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
 		state: &obs.State{},
 		reg:   newRegistry(),

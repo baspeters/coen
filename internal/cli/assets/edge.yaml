@@ -27,6 +27,7 @@ routes:
     # allow_shared_cert: false  # true: several agents may run with one certificate
     # http3: false          # keep this host on TCP (Windows sign-in); see README
 drain_timeout: 15s          # finish in-flight streams up to this long on shutdown
+# agent_wait: 5s            # a request with no agent to take it waits this long for one; 0 = off
 log:
   level: info
   # format:                 # unset autodetects: journal under systemd, text in a terminal. Override: text|json|journal
