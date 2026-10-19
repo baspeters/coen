@@ -95,6 +95,10 @@ func TestServerClientSessionLoopback(t *testing.T) {
 
 	serverErrc := make(chan error, 1)
 	serverMsg := make(chan string, 1)
+	// The server keeps its session until the client is done: closing it
+	// right after replying can make the client's write, already delivered,
+	// report the session shut down before its send completes.
+	clientDone := make(chan struct{})
 	go func() {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -127,7 +131,9 @@ func TestServerClientSessionLoopback(t *testing.T) {
 			return
 		}
 		serverErrc <- nil
+		<-clientDone
 	}()
+	defer close(clientDone)
 
 	conn, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {

@@ -46,8 +46,9 @@ func TestStatusCommandAutoDetect(t *testing.T) {
 		SetLevel: func(slog.Level) error { return nil },
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go func() { _ = srv.Serve(ctx, sock) }()
+	served := make(chan struct{})
+	go func() { _ = srv.Serve(ctx, sock); close(served) }()
+	t.Cleanup(func() { cancel(); <-served }) // runs before the temporary directory's cleanup
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		if _, e := admin.Status(sock); e == nil {
