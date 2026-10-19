@@ -20,3 +20,5 @@ routes:
     agent_fingerprint: "REPLACE_WITH_AGENT_FINGERPRINT"
     max_connections: 64
 drain_timeout: 30s            # on shutdown, finish in-flight streams for up to 30s
+admin:
+  socket: /run/coen/edge.sock   # for `coen status` and `coen doctor`

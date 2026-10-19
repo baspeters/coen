@@ -1,5 +1,7 @@
 package edge
 
+import "context"
+
 // semaphore is a non-blocking counting limiter. A nil *semaphore is unlimited.
 type semaphore struct {
 	ch chan struct{}
@@ -20,6 +22,19 @@ func (s *semaphore) tryAcquire() bool {
 	case s.ch <- struct{}{}:
 		return true
 	default:
+		return false
+	}
+}
+
+// acquire waits for a slot until ctx ends, and reports whether it got one.
+func (s *semaphore) acquire(ctx context.Context) bool {
+	if s == nil {
+		return true
+	}
+	select {
+	case s.ch <- struct{}{}:
+		return true
+	case <-ctx.Done():
 		return false
 	}
 }

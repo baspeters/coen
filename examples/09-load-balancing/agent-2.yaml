@@ -7,3 +7,5 @@ edge:
 routes:
   - host: api.example.com
     service: 127.0.0.1:9000
+admin:
+  socket: /run/coen/agent.sock   # for `coen status` and `coen doctor`

@@ -24,6 +24,7 @@ type State struct {
 	lastError         atomic.Value // string
 	peerFP            atomic.Value // string
 	selfFP            atomic.Value // string: this daemon's own certificate fingerprint
+	http3Listen       atomic.Value // string: edge: the UDP address HTTP/3 is served on
 
 	agentsMu    sync.Mutex
 	agents      map[*AgentSession]struct{} // edge: connected agent sessions (several may share a fingerprint)
@@ -159,8 +160,14 @@ func (s *State) SetDisconnected() {
 
 // StreamOpened counts a newly opened stream, globally and, when r is non-nil,
 // on its route. One call records both, so the two views cannot drift apart.
-func (s *State) StreamOpened(r *RouteStats) {
-	r.opened()
+func (s *State) StreamOpened(r *RouteStats) { s.streamOpened(r, false) }
+
+// StreamOpenedHTTP3 is StreamOpened for a stream carrying an HTTP/3 request,
+// which the route counts separately.
+func (s *State) StreamOpenedHTTP3(r *RouteStats) { s.streamOpened(r, true) }
+
+func (s *State) streamOpened(r *RouteStats, http3 bool) {
+	r.opened(http3)
 	n := s.activeStreams.Add(1)
 	s.totalStreams.Add(1)
 	// Raise the concurrency high-water mark if this open set a new peak.
@@ -203,6 +210,10 @@ func (s *State) SetError(e string) { s.lastError.Store(e) }
 // equals the agent's peer_fp.
 func (s *State) SetSelfFingerprint(fp string) { s.selfFP.Store(fp) }
 
+// SetHTTP3Listen records the UDP address the edge serves HTTP/3 on, so a
+// `coen doctor` run can tell that the running edge holds it.
+func (s *State) SetHTTP3Listen(addr string) { s.http3Listen.Store(addr) }
+
 type Snapshot struct {
 	Role              string      `json:"role,omitempty"`
 	TunnelConnected   bool        `json:"tunnel_connected"`
@@ -222,6 +233,7 @@ type Snapshot struct {
 	SelfFingerprint   string      `json:"self_fingerprint,omitempty"`
 	PeerFingerprint   string      `json:"peer_fingerprint,omitempty"`
 	Agents            []AgentInfo `json:"agents,omitempty"`
+	HTTP3Listen       string      `json:"http3_listen,omitempty"`
 }
 
 func loadStr(v *atomic.Value) string {
@@ -252,6 +264,7 @@ func (s *State) snapshot(routes []RouteSnapshot) Snapshot {
 		LastError:         loadStr(&s.lastError),
 		SelfFingerprint:   loadStr(&s.selfFP),
 		PeerFingerprint:   loadStr(&s.peerFP),
+		HTTP3Listen:       loadStr(&s.http3Listen),
 	}
 	if snap.TunnelConnected {
 		snap.ConnectedSince = time.Unix(0, s.connectedNano.Load())

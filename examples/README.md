@@ -1,8 +1,9 @@
 # Coen examples
 
 Example configurations for each setup variant and config option. Each folder has
-a sample `edge.yaml` and `agent.yaml` (plus `nginx.conf` where relevant) and a
-`README.md` explaining what it shows.
+an `edge.yaml`, one or more `agent*.yaml`, and, where relevant, `edge.d/` drop-ins,
+an `nginx.conf` or a `prometheus.yml`, plus a `README.md` explaining what it shows.
+Every edge and agent config here is loaded by the test suite, so they stay valid.
 
 The configs are meant to be copied and adapted, not run as-is: paths like
 `/etc/coen/pki/ca.crt` and the `REPLACE_WITH_..._FINGERPRINT` placeholders need
@@ -25,12 +26,15 @@ backends.
 | [07-proxied-multi-host-tls](07-proxied-multi-host-tls/) | proxied | nginx SNI and per-host certs in front of a multi-agent edge |
 | [08-prometheus-metrics](08-prometheus-metrics/) | standalone | the opt-in `/metrics` endpoint on edge and agent, with a scrape config |
 | [09-load-balancing](09-load-balancing/) | standalone | several agents per host, by separate or shared certificates, with failover |
+| [10-http3](10-http3/) | standalone | HTTP/3 (QUIC) for clients, advertised with `Alt-Svc`, and a host kept off it with `http3: false` |
 
 ## Route matching
 
 Precedence is exact, then wildcard (`*.suffix`), then default (`*`). A request
 whose `Host` matches no route gets a `404` from the edge; a matched route whose
-agent is offline gets a `502`; a connection over a cap gets a `503`.
+agent is offline gets a `502`; a connection over a cap gets a `503`. Over HTTP/3,
+a host kept off HTTP/3 gets a `421`, and a request with no response within
+`idle_timeout` (when set) gets a `504`.
 
 ## Config layout: inline or `.d` drop-ins
 

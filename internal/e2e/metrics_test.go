@@ -75,6 +75,8 @@ func TestEndToEndMetrics(t *testing.T) {
 
 	waitFor(t, edgeState,
 		`coen_streams_total{route="app.example.com"} 1`,
+		`coen_streams_http3_total{route="app.example.com"} 0`,
+		`coen_http3_requests_total{route="app.example.com"} 0`,
 		`coen_streams_active{route="app.example.com"} 0`,
 		`coen_streams_total{route="*.example.com"} 1`,
 		`coen_ingress_rejected_total{reason="no_route"} 1`,

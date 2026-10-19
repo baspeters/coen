@@ -8,3 +8,5 @@ tunnel:
   key:  /etc/coen/pki/edge.key
 # No inline routes: each agent's routes live in a drop-in under edge.d/.
 # Drop a file per owner; coen merges them (sorted by filename) at load.
+admin:
+  socket: /run/coen/edge.sock   # for `coen status` and `coen doctor`

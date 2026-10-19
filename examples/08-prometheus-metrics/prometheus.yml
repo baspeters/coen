@@ -1,6 +1,6 @@
-# Minimal Prometheus scrape config for one edge and one agent. Run Prometheus on
-# the same host as each daemon (or point it at a private address), because the
-# metrics endpoint has no authentication.
+# Minimal Prometheus scrape config for one edge and one agent on the same host.
+# On separate hosts, keep only the local job in each host's Prometheus (or point
+# one Prometheus at private addresses), because the endpoint has no authentication.
 scrape_configs:
   - job_name: coen-edge
     static_configs:

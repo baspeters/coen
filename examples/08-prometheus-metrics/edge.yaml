@@ -16,3 +16,5 @@ routes:
     agent_fingerprint: "REPLACE_WITH_AGENT_FINGERPRINT"
 metrics:
   listen: 127.0.0.1:9464      # GET /metrics; loopback only, scraped by a local Prometheus
+admin:
+  socket: /run/coen/edge.sock   # for `coen status` and `coen doctor`

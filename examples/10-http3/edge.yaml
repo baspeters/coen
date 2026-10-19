@@ -1,0 +1,24 @@
+ingress:
+  mode: standalone          # HTTP/3 needs the edge to terminate TLS itself
+  listen: ":443"            # HTTPS over TCP
+  tls:
+    cert: /etc/coen/certs/public.crt
+    key:  /etc/coen/certs/public.key
+  idle_timeout: 60s         # TCP: close a stream idle this long (drops quiet WebSockets; see 06). HTTP/3: close an idle connection and its kept connections to the service after this (30s when unset), and answer 504 to a request with no response in this time (only when set)
+  http3:
+    enabled: true           # HTTP/3 over UDP :443 as well
+    # listen: ":8443"       # another UDP address, if :443 is taken
+    # alt_svc: auto         # auto (default), off, or a literal Alt-Svc value
+tunnel:
+  listen: ":2636"
+  ca:   /etc/coen/pki/ca.crt
+  cert: /etc/coen/pki/edge.crt
+  key:  /etc/coen/pki/edge.key
+routes:
+  - host: app.example.com
+    agent_fingerprint: "REPLACE_WITH_AGENT_FINGERPRINT"
+  - host: intranet.example.com  # signs users in with Windows (NTLM/Negotiate) auth
+    agent_fingerprint: "REPLACE_WITH_AGENT_FINGERPRINT"
+    http3: false            # keep it on TCP: HTTP/3 cannot carry connection-based auth
+admin:
+  socket: /run/coen/edge.sock   # for `coen status` and `coen doctor`

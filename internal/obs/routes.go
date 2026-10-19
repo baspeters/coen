@@ -19,6 +19,9 @@ const (
 	ReasonStreamError                       // edge: tunnel stream could not be opened or set up
 	ReasonPreambleError                     // agent: stream preamble unreadable
 	ReasonDialError                         // agent: backend unreachable
+	ReasonResponseTimeout                   // edge: no response within idle_timeout (HTTP/3)
+	ReasonBadResponse                       // edge: the service's response could not be relayed (HTTP/3)
+	ReasonHTTP3Off                          // edge: HTTP/3 for a route kept off it (routes[].http3: false)
 	numReasons
 )
 
@@ -31,6 +34,9 @@ var reasonNames = [numReasons]string{
 	ReasonStreamError:         "stream_error",
 	ReasonPreambleError:       "preamble_error",
 	ReasonDialError:           "dial_error",
+	ReasonResponseTimeout:     "response_timeout",
+	ReasonBadResponse:         "bad_response",
+	ReasonHTTP3Off:            "http3_off",
 }
 
 // String returns the reason's metric label value.
@@ -46,7 +52,7 @@ func (r Reason) String() string {
 // and any other reason once it is non-zero.
 var (
 	EdgeUnroutedReasons  = []Reason{ReasonMaxConnections, ReasonBadRequest, ReasonNoRoute}
-	EdgeRouteReasons     = []Reason{ReasonRouteMaxConnections, ReasonNoAgent, ReasonStreamError}
+	EdgeRouteReasons     = []Reason{ReasonRouteMaxConnections, ReasonNoAgent, ReasonStreamError, ReasonResponseTimeout, ReasonBadResponse, ReasonHTTP3Off}
 	AgentUnroutedReasons = []Reason{ReasonPreambleError, ReasonNoRoute}
 	AgentRouteReasons    = []Reason{ReasonDialError}
 )
@@ -87,18 +93,32 @@ func (c *reasonCounts) snapshot() ReasonCounts {
 type RouteStats struct {
 	pattern  string
 	active   atomic.Int64
-	total    atomic.Int64
+	total    atomic.Int64 // all streams
+	totalH3  atomic.Int64 // edge: of which for HTTP/3 requests
+	reqH3    atomic.Int64 // edge: HTTP/3 requests sent to the service, over those streams
 	bytes    [byteShards]byteShard
 	next     atomic.Uint32 // round-robin shard assignment for new streams
 	failures reasonCounts
 }
 
-func (r *RouteStats) opened() {
+func (r *RouteStats) opened(http3 bool) {
 	if r == nil {
 		return
 	}
 	r.active.Add(1)
 	r.total.Add(1)
+	if http3 {
+		r.totalH3.Add(1) // after total, so a snapshot never sees more HTTP/3 streams than streams
+	}
+}
+
+// HTTP3Request counts an HTTP/3 request sent to the service. A stream for
+// HTTP/3 requests carries one or more of a connection's requests in turn.
+func (r *RouteStats) HTTP3Request() {
+	if r == nil {
+		return
+	}
+	r.reqH3.Add(1)
 }
 
 func (r *RouteStats) closed() {
@@ -167,7 +187,9 @@ func (r *RouteStats) Failure(reason Reason) {
 type RouteSnapshot struct {
 	Pattern  string
 	Active   int64
-	Total    int64
+	Total    int64 // all streams
+	TotalH3  int64 // of which for HTTP/3 requests (edge)
+	ReqH3    int64 // HTTP/3 requests sent over them (edge)
 	BytesIn  int64
 	BytesOut int64
 	Failures ReasonCounts
@@ -232,10 +254,14 @@ func (s *State) routeSnapshots() []RouteSnapshot {
 	out := make([]RouteSnapshot, 0, len(s.routes))
 	for _, r := range s.routes {
 		in, outB := r.byteTotals()
+		h3 := r.totalH3.Load() // before total (see opened)
+		all := r.total.Load()
 		out = append(out, RouteSnapshot{
 			Pattern:  r.pattern,
 			Active:   r.active.Load(),
-			Total:    r.total.Load(),
+			Total:    all,
+			TotalH3:  h3,
+			ReqH3:    r.reqH3.Load(),
 			BytesIn:  in,
 			BytesOut: outB,
 			Failures: r.failures.snapshot(),
