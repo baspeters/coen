@@ -189,48 +189,6 @@ func TestRequestWithOnlyARefusingAgent(t *testing.T) {
 	}
 }
 
-// An agent that takes the stream and then drops its whole session may
-// already have the request: the edge answers 502 rather than send it to
-// another agent, and does not wait.
-func TestRequestNotResentAfterTheAgentTookIt(t *testing.T) {
-	e, tunLn, ingressLn, agentTLS := newTestEdge(t)
-	e.cfg.AgentWait = config.NewDuration(5 * time.Second)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = e.Serve(ctx, tunLn, ingressLn) }()
-	raw, err := tls.Dial("tcp", tunLn.Addr().String(), agentTLS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sess, err := tunnel.ClientSession(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	go func() {
-		stream, err := sess.AcceptStream()
-		if err != nil {
-			return
-		}
-		_ = tunnel.Accept(stream)
-		_ = raw.Close() // gone, with the request possibly on its way
-	}()
-	for end := time.Now().Add(2 * time.Second); e.reg.size() == 0; time.Sleep(10 * time.Millisecond) {
-		if time.Now().After(end) {
-			t.Fatal("the agent did not register")
-		}
-	}
-	// The edge either notices the session gone as it sends the request (a
-	// 502 from the edge) or after (the stream breaks and, over TCP, the
-	// client connection closes): never a resend, never a wait.
-	resp, took := ingressGet(t, ingressLn.Addr().String())
-	if (resp != "" && !strings.Contains(resp, "502 Bad Gateway")) || took > 3*time.Second {
-		t.Fatalf("got %q after %v", resp, took)
-	}
-	if s := routeStats(e); s.Waits != 0 || s.Failures.Get(obs.ReasonNoAgent) != 0 {
-		t.Fatalf("waits %d, no_agent %d", s.Waits, s.Failures.Get(obs.ReasonNoAgent))
-	}
-}
-
 // An agent that refuses one stream (a briefly full queue) and then serves:
 // the waiting request is tried again within agentRetry and served, rather
 // than waiting out agent_wait for a new session that never joins.
@@ -298,9 +256,9 @@ func TestAgentWaitEndsWithTheEdge(t *testing.T) {
 	<-served
 }
 
-// The same, deterministically: the request head cannot be sent after the
-// agent took the stream. The agent may have part of it, so the edge answers
-// 502 (a stream error) without trying another agent or waiting.
+// The request head cannot be sent after the agent took the stream. The
+// agent may have part of it, so the edge answers 502 (a stream error)
+// without trying another agent or waiting.
 func TestRequestHeadSendFails(t *testing.T) {
 	defer func(old func(net.Conn, []byte) (int, error)) { sendHead = old }(sendHead)
 	sendHead = func(net.Conn, []byte) (int, error) { return 0, io.ErrClosedPipe }
